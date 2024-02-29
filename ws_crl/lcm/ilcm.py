@@ -120,7 +120,10 @@ class ILCM(BaseLCM):
         mse, inverse_consistency_mse = 0, 0
         outputs = {}
 
-        for (intervention, weight,) in self._iterate_interventions(
+        for (
+            intervention,
+            weight,
+        ) in self._iterate_interventions(
             intervention_posterior, deterministic_intervention_encoder, batchsize
         ):
             # Sample from e1, e2 given intervention (including the projection to the counterfactual
@@ -659,3 +662,164 @@ class ILCM(BaseLCM):
         """Overloading the state dict loading so we can compute ancestor structure"""
         super().load_state_dict(state_dict, strict)
         self.scm._compute_ancestors()
+
+
+class MonotonousEffectSequenceILCM(ILCM):
+    def forward(
+        self,
+        x1,
+        x2,
+        interventions=None,
+        beta=1.0,
+        beta_intervention_target=None,
+        pretrain_beta=None,
+        full_likelihood=True,
+        likelihood_reduction="sum",
+        graph_mode="hard",
+        graph_temperature=1.0,
+        graph_samples=1,
+        pretrain=False,
+        model_interventions=True,
+        deterministic_intervention_encoder=False,
+        intervention_encoder_offset=1.0e-4,
+        **kwargs,
+    ):
+        """
+        Evaluates an observed data pair.
+
+        Arguments:
+        ----------
+        x1 : torch.Tensor of shape (batchsize, DIM_X,), dtype torch.float
+            Observed data point (before the intervention)
+        x2 : torch.Tensor of shape (batchsize, DIM_X,), dtype torch.float
+            Observed data point (after the intervention)
+        interventions : None or torch.Tensor of shape (batchsize, DIM_Z,), dtype torch.float
+            If not None, specifies the interventions
+
+        Returns:
+        --------
+        log_prob : torch.Tensor of shape (batchsize, 1), dtype torch.float
+            If `interventions` is not None: Conditional log likelihood
+            `log p(x1, x2 | interventions)`.
+            If `interventions` is None: Marginal log likelihood `log p(x1, x2)`.
+        outputs : dict with str keys and torch.Tensor values
+            Detailed breakdown of the model outputs and internals.
+        """
+
+        # Check inputs
+        if beta_intervention_target is None:
+            beta_intervention_target = beta
+        if pretrain_beta is None:
+            pretrain_beta = beta
+
+        batchsize = x1.shape[0]
+        feature_dims = list(range(1, len(x1.shape)))
+        assert torch.all(torch.isfinite(x1)) and torch.all(torch.isfinite(x2))
+        assert interventions is None
+
+        # Pretraining
+        if pretrain:
+            return self.forward_pretrain(
+                x1,
+                x2,
+                beta=pretrain_beta,
+                full_likelihood=full_likelihood,
+                likelihood_reduction=likelihood_reduction,
+            )
+
+        # Get noise encoding means and stds
+        e1_mean, e1_std = self.encoder.mean_std(x1)
+        e2_mean, e2_std = self.encoder.mean_std(x2)
+
+        # Compute intervention posterior
+        intervention_posterior = self._encode_intervention(
+            e1_mean, e2_mean, intervention_encoder_offset, deterministic_intervention_encoder
+        )
+
+        # Regularization terms
+        e_norm, consistency_mse, _ = self._compute_latent_reg_consistency_mse(
+            e1_mean, e1_std, e2_mean, e2_std, feature_dims, x1, x2, beta=beta
+        )
+
+        # Iterate over interventions
+        log_posterior_eps, log_prior_eps = 0, 0
+        log_posterior_int, log_prior_int, log_likelihood = 0, 0, 0
+        mse, inverse_consistency_mse = 0, 0
+        outputs = {}
+
+        for (
+            intervention,
+            weight,
+        ) in self._iterate_interventions(
+            intervention_posterior, deterministic_intervention_encoder, batchsize
+        ):
+            # Sample from e1, e2 given intervention (including the projection to the counterfactual
+            # manifold)
+            e1_proj, e2_proj, log_posterior1_proj, log_posterior2_proj = self._project_and_sample(
+                e1_mean, e1_std, e2_mean, e2_std, intervention
+            )
+
+            # Compute ELBO terms
+            (
+                log_likelihood_proj,
+                log_posterior_eps_proj,
+                log_posterior_int_proj,
+                log_prior_eps_proj,
+                log_prior_int_proj,
+                mse_proj,
+                inverse_consistency_mse_proj,
+                outputs_,
+            ) = self._compute_elbo_terms(
+                x1,
+                x2,
+                e1_proj,
+                e2_proj,
+                feature_dims,
+                full_likelihood,
+                intervention,
+                likelihood_reduction,
+                log_posterior1_proj,
+                log_posterior2_proj,
+                weight,
+                graph_mode=graph_mode,
+                graph_samples=graph_samples,
+                graph_temperature=graph_temperature,
+                model_interventions=model_interventions,
+            )
+
+            # Sum up results
+            log_posterior_eps += weight * log_posterior_eps_proj
+            log_posterior_int += weight * log_posterior_int_proj
+            log_prior_eps += weight * log_prior_eps_proj
+            log_prior_int += weight * log_prior_int_proj
+            log_likelihood += weight * log_likelihood_proj
+            mse += weight * mse_proj
+            inverse_consistency_mse += inverse_consistency_mse_proj
+
+            # Some more bookkeeping
+            for key, val in outputs_.items():
+                val = val.unsqueeze(1)
+                if key in outputs:
+                    outputs[key] = torch.cat((outputs[key], val), dim=1)
+                else:
+                    outputs[key] = val
+
+        loss = self._compute_outputs(
+            beta,
+            beta_intervention_target,
+            consistency_mse,
+            e1_std,
+            e2_std,
+            e_norm,
+            intervention_posterior,
+            log_likelihood,
+            log_posterior_eps,
+            log_posterior_int,
+            log_prior_eps,
+            log_prior_int,
+            mse,
+            outputs,
+            inverse_consistency_mse,
+        )
+
+        return loss, outputs
