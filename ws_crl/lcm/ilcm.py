@@ -225,7 +225,7 @@ class ILCM(BaseLCM):
         # Get noise encoding means and stds
         e1_mean, e1_std = self.encoder.mean_std(x1)
         e2_mean, e2_std = self.encoder.mean_std(x2)
-        encoder_std = 0.5 * torch.mean(e1_std + e2_std, dim=1, keepdim=True)
+        encoder_std = 0.5 * torch.mean(torch.concat([e1_std, e2_std]), dim=1, keepdim=True)
 
         # Regularization terms
         e_norm, consistency_mse, beta_vae_loss = self._compute_latent_reg_consistency_mse(
@@ -445,9 +445,11 @@ class ILCM(BaseLCM):
             e2_std_proj,
         ) = self._project_to_manifold(intervention, e1_mean, e1_std, e2_mean, e2_std)
 
+        # TODO: why reduction not none for e1? Does maybe not matter?
+        # Try with non sequence and look at difference
         # Sample noise
         e1_proj, log_posterior1_proj = gaussian_encode(
-            e1_mean_proj, e1_std_proj, deterministic=deterministic
+            e1_mean_proj, e1_std_proj, deterministic=deterministic, reduction="none"
         )
         e2_proj, log_posterior2_proj = gaussian_encode(
             e2_mean_proj, e2_std_proj, deterministic=deterministic, reduction="none"
@@ -455,7 +457,14 @@ class ILCM(BaseLCM):
 
         # Sampling should preserve counterfactual consistency
         e2_proj = intervention * e2_proj + (1.0 - intervention) * e1_proj
-        log_posterior2_proj = torch.sum(log_posterior2_proj * intervention, dim=1, keepdim=True)
+
+        log_posterior1_proj = torch.sum(
+            log_posterior2_proj * intervention, dim=list(range(1, len(e1_proj.shape)))
+        ).unsqueeze(-1)
+
+        log_posterior2_proj = torch.sum(
+            log_posterior2_proj * intervention, dim=list(range(1, len(e2_proj.shape)))
+        ).unsqueeze(-1)
 
         return e1_proj, e2_proj, log_posterior1_proj, log_posterior2_proj
 
@@ -492,11 +501,21 @@ class ILCM(BaseLCM):
         full_likelihood=False,
         likelihood_reduction="sum",
     ):
+        batchsize = e1_mean.shape[0]
+
         e1, log_posterior1 = gaussian_encode(e1_mean, e1_std, deterministic=False)
         e2, log_posterior2 = gaussian_encode(e2_mean, e2_std, deterministic=False)
 
+        # TODO: use sequence data instead of reshaping batch?
+
         # Compute latent regularizer (useful early in training)
-        e_norm = torch.sum(e1**2, 1, keepdim=True) + torch.sum(e2**2, 1, keepdim=True)
+        e_norm = torch.concatenate(
+            [
+                torch.sum(e1**2, 1, keepdim=True),
+                torch.sum(e2**2, 1, keepdim=True).reshape(batchsize, -1),
+            ],
+            dim=1,
+        ).sum(dim=1)
 
         # Compute consistency MSE
         consistency_x1_reco, log_likelihood1 = self.decoder(
@@ -513,8 +532,14 @@ class ILCM(BaseLCM):
             full=full_likelihood,
             reduction=likelihood_reduction,
         )
-        consistency_mse = torch.sum((consistency_x1_reco - x1) ** 2, feature_dims).unsqueeze(1)
-        consistency_mse += torch.sum((consistency_x2_reco - x2) ** 2, feature_dims).unsqueeze(1)
+
+        consistency_mse = torch.concatenate(
+            [
+                torch.sum((consistency_x1_reco - x1) ** 2, feature_dims, keepdim=True),
+                torch.sum((consistency_x2_reco - x2) ** 2, feature_dims).reshape(batchsize, -1),
+            ],
+            dim=1,
+        ).sum(dim=1)
 
         # Compute prior and beta-VAE loss (for pre-training)
         log_prior1 = torch.sum(
@@ -527,11 +552,18 @@ class ILCM(BaseLCM):
             dim=1,
             keepdim=True,
         )
-        beta_vae_loss = (
-            -log_likelihood1
-            - log_likelihood2
-            + beta * (log_posterior1 + log_posterior2 - log_prior1 - log_prior2)
+
+        log_likelihood = torch.concatenate(
+            [log_likelihood1, log_likelihood2.reshape(batchsize, -1)], dim=1
+        ).sum(dim=1)
+        log_prior = torch.concatenate([log_prior1, log_prior2.reshape(batchsize, -1)], dim=1).sum(
+            dim=1
         )
+        log_posterior = torch.concatenate(
+            [log_posterior1, log_posterior2.reshape(batchsize, -1)], dim=1
+        ).sum(dim=1)
+
+        beta_vae_loss = -log_likelihood + beta * (log_posterior - log_prior)
 
         return e_norm, consistency_mse, beta_vae_loss
 
@@ -552,6 +584,8 @@ class ILCM(BaseLCM):
         mse,
         outputs,
         inverse_consistency_mse,
+        intervened_sequence_loss=None,
+        unintervened_sequence_loss=None,
     ):
         # Put together to compute the ELBO and beta-VAE loss
         kl_int = log_posterior_int - log_prior_int
@@ -576,7 +610,12 @@ class ILCM(BaseLCM):
         outputs["consistency_mse"] = consistency_mse
         outputs["inverse_consistency_mse"] = inverse_consistency_mse
         outputs["z_regularization"] = e_norm
-        outputs["encoder_std"] = 0.5 * torch.mean(e1_std + e2_std, dim=1, keepdim=True)
+        outputs["encoder_std"] = 0.5 * torch.mean(
+            torch.concat([e1_std, e2_std]), dim=1, keepdim=True
+        )
+
+        outputs["intervened_sequence_loss"] = intervened_sequence_loss
+        outputs["unintervened_sequence_loss"] = unintervened_sequence_loss
 
         return beta_vae_loss
 
@@ -594,8 +633,10 @@ class ILCM(BaseLCM):
         log_posterior2_proj,
         weight,
         model_interventions=True,
+        sequence_length=None,
         **prior_kwargs,
     ):
+        batchsize = x1.shape[0]
         # Compute posterior q(e1, e2_I | I)
         log_posterior_eps_proj = log_posterior1_proj + log_posterior2_proj
         assert torch.all(torch.isfinite(log_posterior_eps_proj))
@@ -620,18 +661,40 @@ class ILCM(BaseLCM):
             full=full_likelihood,
             reduction=likelihood_reduction,
         )
-        log_likelihood_proj = log_likelihood1_proj + log_likelihood2_proj
+        # log_likelihood_proj = log_likelihood1_proj + log_likelihood2_proj
+        log_likelihood_proj = torch.concatenate(
+            [log_likelihood1_proj, log_likelihood2_proj.reshape(batchsize, -1)], dim=1
+        ).sum(dim=1, keepdim=True)
         assert torch.all(torch.isfinite(log_likelihood_proj))
 
         # Compute MSE
-        mse_proj = torch.sum((x1_reco_proj - x1) ** 2, feature_dims).unsqueeze(1)
-        mse_proj += torch.sum((x2_reco_proj - x2) ** 2, feature_dims).unsqueeze(1)
+        # mse_proj = torch.sum((x1_reco_proj - x1) ** 2, feature_dims).unsqueeze(1)
+        # mse_proj += torch.sum((x2_reco_proj - x2) ** 2, feature_dims).unsqueeze(1)
+        mse_proj = torch.concatenate(
+            [
+                torch.sum((x1_reco_proj - x1) ** 2, feature_dims, keepdim=True),
+                torch.sum((x2_reco_proj - x2) ** 2, feature_dims).reshape(batchsize, -1),
+            ],
+            dim=1,
+        ).sum(dim=1, keepdim=True)
 
         # Compute inverse consistency MSE: |z - encode(decode(z))|^2
         e1_reencoded = self.encode_to_noise(x1_reco_proj, deterministic=False)
         e2_reencoded = self.encode_to_noise(x2_reco_proj, deterministic=False)
-        inverse_consistency_mse_proj = torch.sum((e1_reencoded - e1_proj) ** 2, 1, keepdim=True)
-        inverse_consistency_mse_proj += torch.sum((e2_reencoded - e2_proj) ** 2, 1, keepdim=True)
+        # inverse_consistency_mse_proj = torch.sum((e1_reencoded - e1_proj) ** 2, 1, keepdim=True)
+        # inverse_consistency_mse_proj += torch.sum((e2_reencoded - e2_proj) ** 2, 1, keepdim=True)
+        inverse_consistency_mse_proj = torch.concatenate(
+            [
+                torch.sum((e1_reencoded - e1_proj) ** 2, 1, keepdim=True),
+                torch.sum((e2_reencoded - e2_proj) ** 2, 1).reshape(batchsize, -1),
+            ],
+            dim=1,
+        ).sum(dim=1, keepdim=True)
+
+        # Expand to sequence length to match each e2 with corresponding e1
+        if sequence_length is not None:
+            e1_proj = expand_observational_to_sequence_length(e1_proj, sequence_length)
+            intervention = expand_observational_to_sequence_length(intervention, sequence_length)
 
         # Compute prior p(e1, e2 | I)
         log_prior_eps_proj, outputs = self.scm.log_prob_noise_weakly_supervised(
@@ -643,6 +706,8 @@ class ILCM(BaseLCM):
             include_nonintervened=False,
         )
         assert torch.all(torch.isfinite(log_prior_eps_proj))
+
+        log_prior_eps_proj = log_prior_eps_proj.reshape(batchsize, -1).sum(dim=1, keepdim=True)
 
         # Compute prior pi(I) = 1 / n_interventions
         log_prior_int_proj = -np.log(self.n_interventions) * torch.ones_like(log_prior_eps_proj)
@@ -664,11 +729,76 @@ class ILCM(BaseLCM):
         self.scm._compute_ancestors()
 
 
+def ranking_loss(startpoints, sequences, reduction="mean"):
+    pd = sequences.unsqueeze(-2) - sequences.unsqueeze(-1)
+
+    # Determine the direction of the ranking
+    forwards = sequences[:, -1] - startpoints >= 0
+
+    # flip to make all go in the same direction
+    pd = torch.where(forwards.view(-1, 1, 1), -pd, pd)
+
+    # Select the upper triangular part of the distance matrix to only consider one direction
+    selected_pd = torch.triu(pd, diagonal=0)
+
+    # Differences that are in the wrong direction
+    backwards_diffs = torch.max(torch.zeros_like(selected_pd), selected_pd)
+
+    if reduction == "sum":
+        loss = torch.sum(backwards_diffs, dim=list(range(1, len(backwards_diffs.shape)))).unsqueeze(
+            -1
+        )
+        return loss
+    if reduction == "mean":
+        loss = torch.mean(
+            backwards_diffs, dim=list(range(1, len(backwards_diffs.shape)))
+        ).unsqueeze(-1)
+        return loss
+    raise NotImplementedError(f"Reduction {reduction} not implemented")
+
+
+def sequence_to_batch(x_sequence):
+    return x_sequence.reshape(-1, *x_sequence.shape[2:])  # (B*T, *x_dim)
+
+
+def batch_to_sequence(x, batchsize):
+    return x.reshape(batchsize, -1, x.shape[-1])  # (B, T, z_dim)
+
+
+def expand_observational_to_sequence_length(x, sequence_length):
+    return x.unsqueeze(1).expand(-1, sequence_length, -1).reshape(-1, *x.shape[1:])  # (B*T, *x_dim)
+
+
 class MonotonousEffectSequenceILCM(ILCM):
+
+    def __init__(
+        self,
+        causal_model,
+        encoder,
+        decoder,
+        intervention_encoder,
+        dim_z,
+        sequence_length,
+        intervention_prior=None,
+        intervention_set="atomic_or_none",
+        averaging_strategy="stochastic",
+    ):
+        super().__init__(
+            causal_model,
+            encoder,
+            decoder=decoder,
+            dim_z=dim_z,
+            intervention_prior=intervention_prior,
+            intervention_set=intervention_set,
+            intervention_encoder=intervention_encoder,
+            averaging_strategy=averaging_strategy,
+        )
+        self.sequence_length = sequence_length
+
     def forward(
         self,
-        x1,
-        x2,
+        x1,  # (B, *x_dim)
+        x2_sequence,  # (B, T, *x_dim)
         interventions=None,
         beta=1.0,
         beta_intervention_target=None,
@@ -684,28 +814,6 @@ class MonotonousEffectSequenceILCM(ILCM):
         intervention_encoder_offset=1.0e-4,
         **kwargs,
     ):
-        """
-        Evaluates an observed data pair.
-
-        Arguments:
-        ----------
-        x1 : torch.Tensor of shape (batchsize, DIM_X,), dtype torch.float
-            Observed data point (before the intervention)
-        x2 : torch.Tensor of shape (batchsize, DIM_X,), dtype torch.float
-            Observed data point (after the intervention)
-        interventions : None or torch.Tensor of shape (batchsize, DIM_Z,), dtype torch.float
-            If not None, specifies the interventions
-
-        Returns:
-        --------
-        log_prob : torch.Tensor of shape (batchsize, 1), dtype torch.float
-            If `interventions` is not None: Conditional log likelihood
-            `log p(x1, x2 | interventions)`.
-            If `interventions` is None: Marginal log likelihood `log p(x1, x2)`.
-        outputs : dict with str keys and torch.Tensor values
-            Detailed breakdown of the model outputs and internals.
-        """
-
         # Check inputs
         if beta_intervention_target is None:
             beta_intervention_target = beta
@@ -714,14 +822,17 @@ class MonotonousEffectSequenceILCM(ILCM):
 
         batchsize = x1.shape[0]
         feature_dims = list(range(1, len(x1.shape)))
-        assert torch.all(torch.isfinite(x1)) and torch.all(torch.isfinite(x2))
+        assert torch.all(torch.isfinite(x1)) and torch.all(torch.isfinite(x2_sequence))
         assert interventions is None
+
+        x2_batch = sequence_to_batch(x2_sequence)  # (B*T, *x_dim)
+        x2_last = x2_sequence[:, -1]
 
         # Pretraining
         if pretrain:
             return self.forward_pretrain(
                 x1,
-                x2,
+                x2_batch,
                 beta=pretrain_beta,
                 full_likelihood=full_likelihood,
                 likelihood_reduction=likelihood_reduction,
@@ -729,16 +840,38 @@ class MonotonousEffectSequenceILCM(ILCM):
 
         # Get noise encoding means and stds
         e1_mean, e1_std = self.encoder.mean_std(x1)
-        e2_mean, e2_std = self.encoder.mean_std(x2)
+        e2_mean_batch, e2_std_batch = self.encoder.mean_std(x2_batch)
 
-        # Compute intervention posterior
-        intervention_posterior = self._encode_intervention(
-            e1_mean, e2_mean, intervention_encoder_offset, deterministic_intervention_encoder
+        e1_mean_sequence = e1_mean.unsqueeze(1)
+        e1_std_sequence = e1_std.unsqueeze(1)
+
+        e2_mean_sequence = batch_to_sequence(e2_mean_batch, batchsize)
+        e2_std_sequence = batch_to_sequence(e2_std_batch, batchsize)
+
+        e2_mean_last = e2_mean_sequence[:, -1]
+        e2_std_last = e2_std_sequence[:, -1]
+
+        # Compute intervention posterior between observational and last sequence element
+        intervention_posterior_last = self._encode_intervention(
+            e1_mean,
+            e2_mean_last,
+            intervention_encoder_offset,
+            deterministic_intervention_encoder,
         )
 
         # Regularization terms
         e_norm, consistency_mse, _ = self._compute_latent_reg_consistency_mse(
-            e1_mean, e1_std, e2_mean, e2_std, feature_dims, x1, x2, beta=beta
+            e1_mean,
+            e1_std,
+            # e2_mean_batch,
+            e2_mean_last,
+            # e2_std_batch,
+            e2_std_last,
+            feature_dims,
+            x1,
+            # x2_batch,
+            x2_last,
+            beta=beta,
         )
 
         # Iterate over interventions
@@ -747,17 +880,96 @@ class MonotonousEffectSequenceILCM(ILCM):
         mse, inverse_consistency_mse = 0, 0
         outputs = {}
 
+        intervened_sequence_loss, unintervened_sequence_loss = torch.zeros(
+            batchsize, 1, device=x1.device
+        ), torch.zeros(batchsize, 1, device=x1.device)
+
         for (
             intervention,
             weight,
         ) in self._iterate_interventions(
-            intervention_posterior, deterministic_intervention_encoder, batchsize
+            # Iterate over intervention posterior of last sequence element
+            intervention_posterior_last,
+            deterministic_intervention_encoder,
+            batchsize,
         ):
+            intervention_sequence = intervention.unsqueeze(1)
             # Sample from e1, e2 given intervention (including the projection to the counterfactual
             # manifold)
-            e1_proj, e2_proj, log_posterior1_proj, log_posterior2_proj = self._project_and_sample(
-                e1_mean, e1_std, e2_mean, e2_std, intervention
+            e1_proj_sequence, e2_proj_sequence, log_posterior1_proj, log_posterior2_proj = (
+                self._project_and_sample(
+                    e1_mean_sequence,
+                    e1_std_sequence,
+                    e2_mean_sequence,
+                    e2_std_sequence,
+                    intervention_sequence,
+                )
             )
+            e_proj_sequence = torch.concatenate(
+                [e1_proj_sequence, e2_proj_sequence], dim=1
+            )  # (B, T+1, z_dim)
+
+            # e1_proj, e2_last_proj, log_posterior1_proj, log_posterior2_proj = self._project_and_sample(
+            #     e1_mean,
+            #     e1_std,
+            #     e2_mean_last,
+            #     e2_std_last,
+            #     intervention,
+            # )
+            # e_proj_sequence = torch.concatenate(
+            #     [e1_proj,  e2_last_proj], dim=1
+            # )  # (B, T+1, z_dim)
+
+            # assert (intervention[0] == intervention).all()
+            # NOTE: Assuming atomic interventions for now
+            assert ((intervention.sum(-1) == 0) | (intervention.sum(-1) == 1)).all()
+
+            # Select samples that were intervened on
+            sample_was_intervened_on = torch.any(intervention, dim=1)
+            intervention_non_empty = intervention[sample_was_intervened_on]
+
+            if len(intervention_non_empty) > 0:
+                # NOTE: num_intervened = 1 for non-empty atomic interventions
+
+                # Samples where intervention is non-empty
+                e_proj_sequence_intervened = e_proj_sequence[sample_was_intervened_on]
+
+                # Select component that was intervened on
+                intervened_e_proj_sequence = torch.masked_select(
+                    e_proj_sequence_intervened, intervention_non_empty.unsqueeze(1).bool()
+                ).view(
+                    -1, self.sequence_length + 1, 1
+                )  # (B_intervened, T+1, num_intervened)
+
+                intervened_e_proj_sequence_batch = intervened_e_proj_sequence.transpose(
+                    1, 2
+                ).reshape(
+                    -1, self.sequence_length + 1
+                )  # (B_intervened*num_intervened, T+1)
+                startpoints = intervened_e_proj_sequence_batch[:, 0]
+                intervened_sequence_loss_proj = ranking_loss(
+                    startpoints,
+                    intervened_e_proj_sequence_batch,
+                    reduction="mean",
+                )
+            else:
+                intervened_sequence_loss_proj = 0
+
+            # TODO: remove / make optional
+            # Should also be implicitly there by projection
+
+            # if e_proj_unintervened_sequence.shape[2] != 0:
+            #     pd_e_proj_unintervened = e_proj_unintervened_sequence.unsqueeze(
+            #         -2
+            #     ) - e_proj_unintervened_sequence.unsqueeze(-1)
+            #     unintervened_sequence_loss_proj = torch.sum(pd_e_proj_unintervened**2).unsqueeze(0)
+            # else:
+            #     unintervened_sequence_loss_proj = 0
+            unintervened_sequence_loss_proj = torch.zeros(
+                batchsize, 1, device=e_proj_sequence.device
+            )
+
+            e2_proj_last = e2_proj_sequence[:, -1]
 
             # Compute ELBO terms
             (
@@ -771,20 +983,22 @@ class MonotonousEffectSequenceILCM(ILCM):
                 outputs_,
             ) = self._compute_elbo_terms(
                 x1,
-                x2,
-                e1_proj,
-                e2_proj,
+                x2_last,
+                e1_proj_sequence[:, 0],
+                e2_proj_last,
                 feature_dims,
                 full_likelihood,
                 intervention,
                 likelihood_reduction,
-                log_posterior1_proj,
-                log_posterior2_proj,
+                log_posterior1_proj[:, 0],
+                log_posterior2_proj[:, -1],
                 weight,
                 graph_mode=graph_mode,
                 graph_samples=graph_samples,
                 graph_temperature=graph_temperature,
                 model_interventions=model_interventions,
+                # sequence_length=self.sequence_length,
+                sequence_length=None,
             )
 
             # Sum up results
@@ -795,6 +1009,18 @@ class MonotonousEffectSequenceILCM(ILCM):
             log_likelihood += weight * log_likelihood_proj
             mse += weight * mse_proj
             inverse_consistency_mse += inverse_consistency_mse_proj
+
+            intervened_sequence_loss = intervened_sequence_loss.index_add(
+                0,
+                sample_was_intervened_on.nonzero().squeeze(),
+                weight[sample_was_intervened_on] * intervened_sequence_loss_proj,
+            )
+            # unintervened_sequence_loss = unintervened_sequence_loss.index_add(
+            #     0,
+            #     sample_was_intervened_on.nonzero().squeeze(),
+            #     weight[sample_was_intervened_on] * unintervened_sequence_loss_proj,
+            # )
+            unintervened_sequence_loss = unintervened_sequence_loss_proj
 
             # Some more bookkeeping
             for key, val in outputs_.items():
@@ -809,9 +1035,10 @@ class MonotonousEffectSequenceILCM(ILCM):
             beta_intervention_target,
             consistency_mse,
             e1_std,
-            e2_std,
+            e2_std_batch,
             e_norm,
-            intervention_posterior,
+            # TODO: use only last intervention posterior?
+            intervention_posterior_last,
             log_likelihood,
             log_posterior_eps,
             log_posterior_int,
@@ -820,6 +1047,97 @@ class MonotonousEffectSequenceILCM(ILCM):
             mse,
             outputs,
             inverse_consistency_mse,
+            intervened_sequence_loss,
+            unintervened_sequence_loss,
         )
 
         return loss, outputs
+
+    def _project_to_manifold(self, intervention, e1_mean, e1_std, e2_mean, e2_std):
+        batchsize = e1_mean.shape[0]
+        if self.averaging_strategy == "z2":
+            # lam = torch.ones_like(e1_mean)
+            raise NotImplementedError()
+        elif self.averaging_strategy in ["average", "mean"]:
+            # lam = 0.5 * torch.ones_like(e1_mean)
+            raise NotImplementedError()
+        elif self.averaging_strategy == "stochastic":
+            # lam = torch.rand_like(e1_mean)
+            lam = torch.rand((batchsize, self.sequence_length + 1, self.dim_z)).to(e1_mean.device)
+            lam = lam / torch.sum(lam, dim=1, keepdim=True)
+        else:
+            raise ValueError(f"Unknown averaging strategy {self.averaging_strategy}")
+
+        # TODO: test with pairwise averages
+        projection_mean = torch.concatenate(
+            [lam[:, 0:1, :] * e1_mean, lam[:, 1:, :] * e2_mean], dim=1
+        ).sum(dim=1, keepdim=True)
+        projection_std = torch.concatenate(
+            [lam[:, 0:1, :] * e1_std, lam[:, 1:, :] * e2_std], dim=1
+        ).sum(dim=1, keepdim=True)
+
+        e1_mean = intervention * e1_mean + (1.0 - intervention) * projection_mean
+        e1_std = intervention * e1_std + (1.0 - intervention) * projection_std
+        e2_mean = intervention * e2_mean + (1.0 - intervention) * projection_mean
+        e2_std = intervention * e2_std + (1.0 - intervention) * projection_std
+
+        return e1_mean, e1_std, e2_mean, e2_std
+
+    def encode_decode_pair(self, x1, x2_sequence, deterministic=True):
+        batchsize = x1.shape[0]
+
+        x2_batch = sequence_to_batch(x2_sequence)  # (B*T, *x_dim)
+
+        # Get noise encoding means and stds
+        e1_mean, e1_std = self.encoder.mean_std(x1)
+        e2_mean_batch, e2_std_batch = self.encoder.mean_std(x2_batch)
+
+        e1_mean_sequence = e1_mean.unsqueeze(1)
+        e1_std_sequence = e1_std.unsqueeze(1)
+
+        e2_mean_sequence = batch_to_sequence(e2_mean_batch, batchsize)
+        e2_std_sequence = batch_to_sequence(e2_std_batch, batchsize)
+
+        e2_mean_last = e2_mean_sequence[:, -1]
+
+        # Compute intervention posterior
+        intervention_encoder_inputs = torch.cat((e1_mean, e2_mean_last - e1_mean), dim=1)
+        intervention_posterior = self.intervention_encoder(intervention_encoder_inputs)
+
+        # Determine most likely intervention
+        most_likely_intervention_idx = torch.argmax(intervention_posterior, dim=1).flatten()
+        intervention = self._interventions[most_likely_intervention_idx]
+
+        intervention_sequence = intervention.unsqueeze(1)
+
+        # Project to manifold
+        e1_proj_sequence, e2_proj_sequence, log_posterior1_proj, log_posterior2_proj = (
+            self._project_and_sample(
+                e1_mean_sequence,
+                e1_std_sequence,
+                e2_mean_sequence,
+                e2_std_sequence,
+                intervention_sequence,
+                deterministic=deterministic,
+            )
+        )
+
+        e1_proj = e1_proj_sequence[:, 0]
+
+        # Project back to data space
+        x1_reco = self.decode_noise(e1_proj)
+        x2_reco_batch = self.decode_noise(sequence_to_batch(e2_proj_sequence))
+
+        x2_reco_sequence = batch_to_sequence(x2_reco_batch, batchsize)
+
+        return (
+            x1_reco,
+            x2_reco_sequence,
+            e1_mean,
+            e2_mean_sequence,
+            e1_proj,
+            e2_proj_sequence,
+            intervention_posterior,
+            most_likely_intervention_idx,
+            intervention,
+        )
