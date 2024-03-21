@@ -528,6 +528,16 @@ def step_schedules(cfg, model, fractional_epoch):
     intervention_encoder_offset = generic_scheduler(
         cfg, cfg.training.intervention_encoder_offset_schedule, fractional_epoch, default_value=0.0
     )
+    intervened_sequence_regularization_amount = None
+    if "intervened_sequence_regularization_schedule" in cfg.training:
+        intervened_sequence_regularization_amount = generic_scheduler(
+            cfg, cfg.training.intervened_sequence_regularization_schedule, fractional_epoch, default_value=0.0
+        )
+    unintervened_sequence_regularization_amount = None
+    if "unintervened_sequence_regularization_schedule" in cfg.training:
+        unintervened_sequence_regularization_amount = generic_scheduler(
+            cfg, cfg.training.unintervened_sequence_regularization_schedule, fractional_epoch, default_value=0.0
+        )
     return (
         beta,
         beta_intervention,
@@ -538,6 +548,8 @@ def step_schedules(cfg, model, fractional_epoch):
         z_regularization_amount,
         intervention_entropy_regularization_amount,
         intervention_encoder_offset,
+        intervened_sequence_regularization_amount,
+        unintervened_sequence_regularization_amount,
     )
 
 
