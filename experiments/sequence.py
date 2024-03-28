@@ -42,6 +42,7 @@ from ws_crl.metrics import compute_dci
 from ws_crl.plotting import (
     plot_average_intervention_posterior,
     plot_counterfactuals,
+    plot_implicit_graph,
     plot_importance_matrix,
     plot_latent_space,
     plot_noise_pairs,
@@ -634,6 +635,12 @@ def plot_loop(cfg, model, loader, metrics, device, step):
             device,
             filename=plot_dir / f"solution_function_responses_step_{step}.pdf",
             artifact_folder="solution_function_responses",
+        )
+        plot_implicit_graph(
+            cfg,
+            metrics,
+            filename=plot_dir / f"implicit_graph_step_{step}.pdf",
+            artifact_folder="implicit_graph",
         )
 
         # TODO: save noise encodings as e2 instead of counterfactual noise

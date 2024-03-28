@@ -8,11 +8,12 @@ from pathlib import Path
 import matplotlib
 import matplotlib.pyplot as plt
 import mlflow
+import networkx as nx
 import numpy as np
-from omegaconf import OmegaConf
 import seaborn as sns
 import torch
 from matplotlib.collections import LineCollection
+from omegaconf import OmegaConf
 
 from ws_crl.encoder.base import Inverse
 from ws_crl.encoder.flow import SONEncoder
@@ -599,3 +600,39 @@ def plot_solution_function_responses(
         plt.close(fig)
     else:
         fig.show()
+
+
+def plot_implicit_graph(cfg, metrics, filename=None, artifact_folder=None):
+    adjacency_matrix = generate_directed_graph_matrix(metrics, f"implicit_graph_")
+    adjacency_matrix = adjacency_matrix.cpu().numpy()
+
+    G = nx.from_numpy_array(adjacency_matrix, create_using=nx.DiGraph)
+    pos = nx.spring_layout(G)
+
+    # Filter out edges with weights below the threshold
+    weight_threshold = 0.01
+    edge_data_to_draw = [
+        (u, v, d) for u, v, d in G.edges(data=True) if d["weight"] >= weight_threshold
+    ]
+    edges_to_draw = [(u, v) for u, v, _ in edge_data_to_draw]
+    weights_to_draw = [d["weight"] for _, _, d in edge_data_to_draw]
+
+    edge_width = 2
+    widths_to_draw = [w * edge_width for w in weights_to_draw]
+
+    nx.draw(G, pos, edgelist=edges_to_draw, with_labels=True, width=widths_to_draw)
+
+    labels = nx.get_edge_attributes(G, "weight")
+    labels = {k: v for k, v in labels.items() if v >= weight_threshold}
+    labels = {k: round(v, 2) for k, v in labels.items()}
+
+    nx.draw_networkx_edge_labels(G, pos, edge_labels=labels)
+
+    if filename is not None:
+        plt.savefig(filename)
+        mlflow.log_artifact(
+            filename, artifact_folder if artifact_folder is not None else Path(filename).stem
+        )
+        plt.close()
+    else:
+        plt.show()
