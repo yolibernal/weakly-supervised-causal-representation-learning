@@ -193,3 +193,8 @@ def calculate_average_intervention_posterior(
         average_intervention_posterior[intervention_label] += intervention_posterior
     average_intervention_posterior /= average_intervention_posterior.sum(dim=1, keepdim=True)
     return average_intervention_posterior
+
+def remove_prefix(text, prefix):
+    if text.startswith(prefix):
+        return text[len(prefix):]
+    return text

@@ -9,13 +9,15 @@ import matplotlib
 import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
+from omegaconf import OmegaConf
 import seaborn as sns
 import torch
 from matplotlib.collections import LineCollection
 
 from ws_crl.encoder.base import Inverse
 from ws_crl.encoder.flow import SONEncoder
-from ws_crl.utils import generate_directed_graph_matrix, get_first_batch
+from ws_crl.encoder.image_vae import CoordConv2d, ImageSBDecoder
+from ws_crl.utils import generate_directed_graph_matrix, get_first_batch, remove_prefix
 
 # Global constants
 FONTSIZE = 11  # pt
@@ -354,6 +356,43 @@ def plot_x(cfg, x, ax=None):
 
             x, _ = decoder(x.view(1, x.size(0)))
             x = x[0]
+        if cfg.data.encoder.type == "sbd":
+            exp_dir = Path(cfg.data.encoder.exp_dir)
+            decoder_cfg_path = exp_dir / "config.yml"
+
+            model_path = exp_dir / "models" / cfg.data.encoder.model_name
+
+            decoder_cfg = OmegaConf.load(decoder_cfg_path)
+
+            decoder = ImageSBDecoder(
+                in_features=decoder_cfg.model.dim_z,
+                out_resolution=decoder_cfg.model.dim_x[0],
+                out_features=decoder_cfg.model.dim_x[2],
+                hidden_features=decoder_cfg.model.decoder.hidden_channels,
+                min_std=decoder_cfg.model.decoder.min_std,
+                fix_std=decoder_cfg.model.decoder.fix_std,
+                conv_class=(
+                    CoordConv2d
+                    if decoder_cfg.model.decoder.coordinate_embeddings
+                    else torch.nn.Conv2d
+                ),
+                mlp_layers=decoder_cfg.model.decoder.extra_mlp_layers,
+                mlp_hidden=decoder_cfg.model.decoder.extra_mlp_hidden_units,
+                elementwise_hidden=decoder_cfg.model.decoder.elementwise_hidden_units,
+                elementwise_layers=decoder_cfg.model.decoder.elementwise_layers,
+                permutation=decoder_cfg.model.encoder.permutation,
+            )
+            state_dict = torch.load(model_path)
+            state_dict_decoder = {
+                remove_prefix(k, "decoder."): v
+                for k, v in state_dict.items()
+                if k.startswith("decoder.")
+            }
+            decoder.load_state_dict(state_dict_decoder)
+            decoder.to(x.device)
+
+            x, _ = decoder(x.unsqueeze(0), deterministic=True)
+            x = x[0]
 
     if cfg.data.type == "xy_pairs":
         # data is concatenated xy pairs, i.e. [x1, y1, x2, y2, ...]
@@ -363,7 +402,7 @@ def plot_x(cfg, x, ax=None):
         # add margins
         ax.margins(0.1, 0.1)
     elif cfg.data.type == "image":
-        ax.imshow(x.permute(1, 2, 0))
+        ax.imshow(x.clamp(0, 1).mul(255).cpu().permute([1, 2, 0]).to(torch.uint8))
         ax.axis("off")
     else:
         raise ValueError(f"Unknown data type: {cfg.data.type}")
