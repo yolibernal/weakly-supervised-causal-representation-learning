@@ -46,6 +46,7 @@ from ws_crl.plotting import (
     plot_latent_space,
     plot_noise_pairs,
     plot_reconstructions,
+    plot_solution_function_responses,
 )
 from ws_crl.posthoc_graph_learning import (
     compute_implicit_causal_effects,
@@ -624,6 +625,15 @@ def plot_loop(cfg, model, loader, metrics, device, step):
             device,
             filename=plot_dir / f"counterfactuals_step_{step}.pdf",
             artifact_folder="counterfactuals",
+        )
+        plot_solution_function_responses(
+            cfg,
+            model,
+            loader,
+            MAP_interventions,
+            device,
+            filename=plot_dir / f"solution_function_responses_step_{step}.pdf",
+            artifact_folder="solution_function_responses",
         )
 
         # TODO: save noise encodings as e2 instead of counterfactual noise

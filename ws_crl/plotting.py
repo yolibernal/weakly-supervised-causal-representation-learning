@@ -517,3 +517,85 @@ def plot_counterfactuals(
         plt.close(fig)
     else:
         fig.show()
+
+
+def plot_solution_function_responses(
+    cfg,
+    model,
+    loader,
+    MAP_interventions,
+    device,
+    n=50,
+    domain=(-3, 3),
+    sort_by_MAP_interventions=True,
+    filename=None,
+    artifact_folder=None,
+):
+    fig, axes = plt.subplots(
+        nrows=cfg.model.dim_z,
+        ncols=cfg.model.dim_z,
+        figsize=(cfg.model.dim_z * 3, cfg.model.dim_z * 3),
+        sharex=True,
+        sharey=True,
+    )
+
+    if sort_by_MAP_interventions:
+        if len(torch.unique(MAP_interventions)) < cfg.model.dim_z + 1:
+            # don't remap if not all components can be mapped
+            MAP_components = torch.arange(0, cfg.model.dim_z).int()
+        else:
+            # remove empty intervention
+            MAP_components = MAP_interventions[MAP_interventions != 0] - 1
+        MAP_components_inverse = torch.tensor(
+            [list(MAP_components).index(i) for i in range(len(MAP_components))]
+        )
+
+    e_mean = torch.zeros(cfg.model.dim_z)
+    for batch in loader:
+        *_, e1, e2 = batch
+        e_mean += e1.squeeze().mean(dim=0)
+        e_mean += e2.squeeze().mean(dim=0)
+    e_mean /= len(loader) * 2
+
+    x_min, x_max = domain
+    values = torch.linspace(x_min, x_max, n).to(device)
+    solution_function_responses = torch.zeros(cfg.model.dim_z, n, cfg.model.dim_z)
+
+    for i in range(cfg.model.dim_z):
+        e = e_mean.repeat(n, 1).to(device)
+        e[:, i] = values
+        solution_function_responses[MAP_components_inverse[i]] = model.scm.noise_to_causal(e)[
+            :, MAP_components
+        ]
+
+    for i in range(cfg.model.dim_z):
+        for j in range(cfg.model.dim_z):
+            ax = axes[i, j]
+            ax.plot(values.cpu(), solution_function_responses[i, :, j].cpu())
+            ax.set_title(f"$s_{j+1}(e)$, varying $e_{i+1}$")
+
+    # title
+    fig.suptitle(
+        f"Solution functions responses",
+        fontsize=20,
+    )
+
+    plt.figtext(
+        0.5,
+        0.01,
+        f"Mapping from model components: {list(MAP_components.cpu().numpy())}",
+        wrap=True,
+        horizontalalignment="center",
+        fontsize=12,
+    )
+
+    margin = 0.03
+    fig.tight_layout(rect=[margin, margin, 1 - margin, 1 - margin])
+    if filename is not None:
+        fig.savefig(filename)
+        mlflow.log_artifact(
+            filename, artifact_folder if artifact_folder is not None else Path(filename).stem
+        )
+        plt.close(fig)
+    else:
+        fig.show()
