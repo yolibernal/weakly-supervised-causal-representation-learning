@@ -535,7 +535,7 @@ class ILCM(BaseLCM):
 
         consistency_mse = torch.concatenate(
             [
-                torch.sum((consistency_x1_reco - x1) ** 2, feature_dims, keepdim=True),
+                torch.sum((consistency_x1_reco - x1) ** 2, feature_dims).unsqueeze(1),
                 torch.sum((consistency_x2_reco - x2) ** 2, feature_dims).reshape(batchsize, -1),
             ],
             dim=1,
@@ -672,7 +672,7 @@ class ILCM(BaseLCM):
         # mse_proj += torch.sum((x2_reco_proj - x2) ** 2, feature_dims).unsqueeze(1)
         mse_proj = torch.concatenate(
             [
-                torch.sum((x1_reco_proj - x1) ** 2, feature_dims, keepdim=True),
+                torch.sum((x1_reco_proj - x1) ** 2, feature_dims).unsqueeze(1),
                 torch.sum((x2_reco_proj - x2) ** 2, feature_dims).reshape(batchsize, -1),
             ],
             dim=1,
