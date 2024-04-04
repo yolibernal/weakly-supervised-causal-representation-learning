@@ -30,7 +30,7 @@ from experiments.experiment_utils import (
     determine_graph_learning_settings,
     frequency_check,
 )
-from ws_crl.causal.implicit_scm import MLPImplicitSCM
+from ws_crl.causal.implicit_scm import LinearImplicitSCM, MLPImplicitSCM
 from ws_crl.causal.scm import (
     MLPFixedOrderSCM,
     MLPVariableOrderCausalModel,
@@ -162,6 +162,14 @@ def create_scm(cfg):
             manifold_thickness=cfg.model.scm.manifold_thickness,
             hidden_units=cfg.model.scm.hidden_units,
             hidden_layers=cfg.model.scm.hidden_layers,
+            homoskedastic=cfg.model.scm.homoskedastic,
+            dim_z=cfg.model.dim_z,
+            min_std=cfg.model.scm.min_std,
+        )
+    elif noise_centric and cfg.model.scm.type == "linear":
+        scm = LinearImplicitSCM(
+            graph_parameterization=cfg.model.scm.adjacency_matrix,
+            manifold_thickness=cfg.model.scm.manifold_thickness,
             homoskedastic=cfg.model.scm.homoskedastic,
             dim_z=cfg.model.dim_z,
             min_std=cfg.model.scm.min_std,

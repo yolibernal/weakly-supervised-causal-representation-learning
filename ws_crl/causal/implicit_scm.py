@@ -10,7 +10,11 @@ import torch
 from torch import nn
 
 from ws_crl.causal.graph import ENCOLearnedGraph, DDSLearnedGraph, FixedOrderLearnedGraph
-from ws_crl.transforms import make_mlp_structure_transform, MaskedSolutionTransform
+from ws_crl.transforms import (
+    make_linear_structure_transform,
+    make_mlp_structure_transform,
+    MaskedSolutionTransform,
+)
 from ws_crl.utils import mask, clean_and_clamp
 
 DEFAULT_BASE_DENSITY = nflows.distributions.StandardNormal((1,))
@@ -410,6 +414,66 @@ class MLPImplicitSCM(ImplicitSCM):
                     dim_z,
                     hidden_layers,
                     hidden_units,
+                    homoskedastic,
+                    min_std=min_std,
+                    initialization="broad",
+                )
+            )
+
+        super().__init__(
+            graph,
+            solution_functions,
+            base_density,
+            manifold_thickness,
+            dim_z=dim_z,
+            causal_structure=causal_structure,
+        )
+
+
+class LinearImplicitSCM(ImplicitSCM):
+    def __init__(
+        self,
+        graph_parameterization,
+        manifold_thickness,
+        dim_z,
+        base_density=DEFAULT_BASE_DENSITY,
+        homoskedastic=True,
+        min_std=None,
+    ):
+        solution_functions = []
+
+        # Initialize graph
+        causal_structure = None
+        assert graph_parameterization in {
+            "enco",
+            "dds",
+            "fixed_order",
+            None,
+            "none",
+            "none_fixed_order",
+            "none_trivial",
+        }
+        if graph_parameterization == "enco":
+            graph = ENCOLearnedGraph(dim_z)
+        elif graph_parameterization == "dds":
+            graph = DDSLearnedGraph(dim_z)
+        elif graph_parameterization == "fixed_order":
+            graph = FixedOrderLearnedGraph(dim_z)
+        elif graph_parameterization == "none_fixed_order":
+            graph = None
+            causal_structure = "fixed_order"
+        elif graph_parameterization == "none_trivial":
+            graph = None
+            causal_structure = "trivial"
+        else:
+            graph = None
+            causal_structure = "none"
+
+        # Initialize transforms for p(e'|e)
+        for _ in range(dim_z):
+            solution_functions.append(
+                make_linear_structure_transform(
+                    dim_z,
                     homoskedastic,
                     min_std=min_std,
                     initialization="broad",
