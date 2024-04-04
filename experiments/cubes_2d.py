@@ -39,17 +39,26 @@ from ws_crl.causal.scm import (
 from ws_crl.encoder import GaussianEncoder
 from ws_crl.lcm import ELCM, ILCM
 from ws_crl.metrics import compute_dci
+from ws_crl.plotting import (
+    plot_average_intervention_posterior,
+    plot_counterfactuals,
+    plot_importance_matrix,
+    plot_latent_space,
+    plot_reconstructions,
+    plot_solution_function_responses,
+)
 from ws_crl.posthoc_graph_learning import (
     compute_implicit_causal_effects,
     find_topological_order,
     run_enco,
 )
 from ws_crl.training import VAEMetrics
+from ws_crl.utils import calculate_average_intervention_posterior, calculate_intervention_posteriors
 
 
 @hydra.main(
     config_path="../config",
-    config_name="2dcubes_ilcm"
+    config_name="2dcubes_ilcm",
     # config_name="2dcubes_elcm",
 )
 def main(cfg):
@@ -271,6 +280,7 @@ def train(cfg, model):
                 z_regularization_amount,
                 intervention_entropy_regularization_amount,
                 intervention_encoder_offset,
+                *_,
             ) = step_schedules(cfg, model, fractional_epoch)
 
             # GPU
@@ -338,6 +348,9 @@ def train(cfg, model):
                     cfg, model, criteria, val_loader, best_state, val_metrics, step, device
                 )
 
+            if frequency_check(step, cfg.training.plot_every_n_steps):
+                plot_loop(cfg, model, val_loader, val_metrics, device, step)
+
             # Save model checkpoint
             if frequency_check(step, cfg.training.save_model_every_n_steps):
                 save_model(cfg, model, f"model_step_{step}.pt")
@@ -367,6 +380,10 @@ def train(cfg, model):
                 f'with validation loss {best_state["loss"]}'
             )
             model.load_state_dict(best_state["state_dict"])
+
+    # Final plotting loop
+    if cfg.training.plot_every_n_steps is not None and cfg.training.plot_every_n_steps > 0:
+        plot_loop(cfg, model, val_loader, val_metrics, device, step)
 
     # Reset model: back to CPU, reset manifold thickness
     set_manifold_thickness(cfg, model, None)
@@ -429,6 +446,11 @@ def load_dataset(cfg, tag, include_noise_encodings=True, normalize=True):
     x1, x2, *other = data
 
     device = x1.device
+
+    if len(x2.shape) > 2:
+        logger.info("Choosing last sequence element as x2")
+        x2 = x2[:, -1]
+
     if normalize:
         x1_mean, x1_std, x2_mean, x2_std = get_train_mean_std(cfg)
         x1_mean, x1_std, x2_mean, x2_std = (
@@ -497,6 +519,79 @@ def validation_loop(cfg, model, criteria, val_loader, best_state, val_metrics, s
         best_state["loss"] = new_val_loss
         best_state["state_dict"] = model.state_dict().copy()
         best_state["step"] = step
+
+
+def plot_loop(cfg, model, loader, metrics, device, step):
+    model.eval()
+    model.to(device)
+
+    with torch.no_grad():
+        plot_dir = Path(cfg.general.exp_dir) / "figures"
+        plot_dir.mkdir(parents=True, exist_ok=True)
+
+        intervention_posterior, intervention_label = calculate_intervention_posteriors(
+            cfg, model, loader, device
+        )
+        average_intervention_posterior = calculate_average_intervention_posterior(
+            cfg, intervention_posterior, intervention_label, device=device
+        )
+        _, MAP_interventions = average_intervention_posterior.max(dim=1)
+
+        plot_importance_matrix(
+            cfg,
+            metrics,
+            "noise",
+            filename=plot_dir / f"importance_matrix_noise_step_{step}.pdf",
+            artifact_folder="importance_matrix_noise",
+        )
+        plot_importance_matrix(
+            cfg,
+            metrics,
+            "causal",
+            filename=plot_dir / f"importance_matrix_causal_step_{step}.pdf",
+            artifact_folder="importance_matrix_causal",
+        )
+        plot_latent_space(
+            cfg,
+            model,
+            loader,
+            MAP_interventions,
+            device,
+            components=[4, 5],  # TODO: get from cfg
+            filename=plot_dir / f"latent_space_step_{step}.pdf",
+            artifact_folder="latent_space",
+        )
+        plot_average_intervention_posterior(
+            cfg,
+            average_intervention_posterior,
+            filename=plot_dir / f"average_intervention_posterior_step_{step}.pdf",
+            artifact_folder="average_intervention_posterior",
+        )
+        plot_reconstructions(
+            cfg,
+            model,
+            loader,
+            device,
+            filename=plot_dir / f"reconstructions_step_{step}.pdf",
+            artifact_folder="reconstructions",
+        )
+        plot_counterfactuals(
+            cfg,
+            model,
+            loader,
+            device,
+            filename=plot_dir / f"counterfactuals_step_{step}.pdf",
+            artifact_folder="counterfactuals",
+        )
+        plot_solution_function_responses(
+            cfg,
+            model,
+            loader,
+            MAP_interventions,
+            device,
+            filename=plot_dir / f"solution_function_responses_step_{step}.pdf",
+            artifact_folder="solution_function_responses",
+        )
 
 
 def evaluate(cfg, model):
