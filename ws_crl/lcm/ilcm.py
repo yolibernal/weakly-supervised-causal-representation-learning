@@ -225,7 +225,7 @@ class ILCM(BaseLCM):
         # Get noise encoding means and stds
         e1_mean, e1_std = self.encoder.mean_std(x1)
         e2_mean, e2_std = self.encoder.mean_std(x2)
-        encoder_std = 0.5 * torch.mean(torch.concat([e1_std, e2_std]), dim=1, keepdim=True)
+        encoder_std = torch.mean(torch.concat([e1_std, e2_std]), dim=1, keepdim=True)
 
         # Regularization terms
         e_norm, consistency_mse, beta_vae_loss = self._compute_latent_reg_consistency_mse(
