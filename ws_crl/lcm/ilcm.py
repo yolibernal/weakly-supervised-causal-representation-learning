@@ -610,7 +610,7 @@ class ILCM(BaseLCM):
         outputs["consistency_mse"] = consistency_mse
         outputs["inverse_consistency_mse"] = inverse_consistency_mse
         outputs["z_regularization"] = e_norm
-        outputs["encoder_std"] = 0.5 * torch.mean(
+        outputs["encoder_std"] = torch.mean(
             torch.concat([e1_std, e2_std]), dim=1, keepdim=True
         )
 
