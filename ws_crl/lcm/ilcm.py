@@ -8,6 +8,22 @@ from ws_crl.encoder import gaussian_encode
 from ws_crl.lcm.base import BaseLCM
 
 
+def sum_observational_and_counterfactual(x1, x2_batch, feature_dims=None):
+    batchsize = x1.shape[0]
+
+    if feature_dims is None:
+        feature_dims = 1
+
+    result = torch.concatenate(
+        [
+            torch.sum(x1, feature_dims).unsqueeze(1),
+            batch_to_sequence(torch.sum(x2_batch, feature_dims), batchsize=batchsize),
+        ],
+        dim=1,
+    ).sum(dim=1, keepdim=True)
+    return result
+
+
 class ILCM(BaseLCM):
     """
     Top-level class for generative models with
@@ -445,11 +461,9 @@ class ILCM(BaseLCM):
             e2_std_proj,
         ) = self._project_to_manifold(intervention, e1_mean, e1_std, e2_mean, e2_std)
 
-        # TODO: why reduction not none for e1? Does maybe not matter?
-        # Try with non sequence and look at difference
         # Sample noise
         e1_proj, log_posterior1_proj = gaussian_encode(
-            e1_mean_proj, e1_std_proj, deterministic=deterministic, reduction="none"
+            e1_mean_proj, e1_std_proj, deterministic=deterministic
         )
         e2_proj, log_posterior2_proj = gaussian_encode(
             e2_mean_proj, e2_std_proj, deterministic=deterministic, reduction="none"
@@ -457,10 +471,6 @@ class ILCM(BaseLCM):
 
         # Sampling should preserve counterfactual consistency
         e2_proj = intervention * e2_proj + (1.0 - intervention) * e1_proj
-
-        log_posterior1_proj = torch.sum(
-            log_posterior2_proj * intervention, dim=list(range(1, len(e1_proj.shape)))
-        ).unsqueeze(-1)
 
         log_posterior2_proj = torch.sum(
             log_posterior2_proj * intervention, dim=list(range(1, len(e2_proj.shape)))
@@ -501,21 +511,13 @@ class ILCM(BaseLCM):
         full_likelihood=False,
         likelihood_reduction="sum",
     ):
-        batchsize = e1_mean.shape[0]
-
         e1, log_posterior1 = gaussian_encode(e1_mean, e1_std, deterministic=False)
         e2, log_posterior2 = gaussian_encode(e2_mean, e2_std, deterministic=False)
 
         # TODO: use sequence data instead of reshaping batch?
 
         # Compute latent regularizer (useful early in training)
-        e_norm = torch.concatenate(
-            [
-                torch.sum(e1**2, 1, keepdim=True),
-                torch.sum(e2**2, 1, keepdim=True).reshape(batchsize, -1),
-            ],
-            dim=1,
-        ).sum(dim=1)
+        e_norm = sum_observational_and_counterfactual(e1**2, e2**2)
 
         # Compute consistency MSE
         consistency_x1_reco, log_likelihood1 = self.decoder(
@@ -533,13 +535,11 @@ class ILCM(BaseLCM):
             reduction=likelihood_reduction,
         )
 
-        consistency_mse = torch.concatenate(
-            [
-                torch.sum((consistency_x1_reco - x1) ** 2, feature_dims).unsqueeze(1),
-                torch.sum((consistency_x2_reco - x2) ** 2, feature_dims).reshape(batchsize, -1),
-            ],
-            dim=1,
-        ).sum(dim=1)
+        consistency_mse = sum_observational_and_counterfactual(
+            (consistency_x1_reco - x1) ** 2,
+            (consistency_x2_reco - x2) ** 2,
+            feature_dims=feature_dims,
+        )
 
         # Compute prior and beta-VAE loss (for pre-training)
         log_prior1 = torch.sum(
@@ -553,15 +553,9 @@ class ILCM(BaseLCM):
             keepdim=True,
         )
 
-        log_likelihood = torch.concatenate(
-            [log_likelihood1, log_likelihood2.reshape(batchsize, -1)], dim=1
-        ).sum(dim=1)
-        log_prior = torch.concatenate([log_prior1, log_prior2.reshape(batchsize, -1)], dim=1).sum(
-            dim=1
-        )
-        log_posterior = torch.concatenate(
-            [log_posterior1, log_posterior2.reshape(batchsize, -1)], dim=1
-        ).sum(dim=1)
+        log_likelihood = sum_observational_and_counterfactual(log_likelihood1, log_likelihood2)
+        log_prior = sum_observational_and_counterfactual(log_prior1, log_prior2)
+        log_posterior = sum_observational_and_counterfactual(log_posterior1, log_posterior2)
 
         beta_vae_loss = -log_likelihood + beta * (log_posterior - log_prior)
 
@@ -610,9 +604,7 @@ class ILCM(BaseLCM):
         outputs["consistency_mse"] = consistency_mse
         outputs["inverse_consistency_mse"] = inverse_consistency_mse
         outputs["z_regularization"] = e_norm
-        outputs["encoder_std"] = torch.mean(
-            torch.concat([e1_std, e2_std]), dim=1, keepdim=True
-        )
+        outputs["encoder_std"] = torch.mean(torch.concat([e1_std, e2_std]), dim=1, keepdim=True)
 
         outputs["intervened_sequence_loss"] = intervened_sequence_loss
         outputs["unintervened_sequence_loss"] = unintervened_sequence_loss
@@ -662,34 +654,23 @@ class ILCM(BaseLCM):
             reduction=likelihood_reduction,
         )
         # log_likelihood_proj = log_likelihood1_proj + log_likelihood2_proj
-        log_likelihood_proj = torch.concatenate(
-            [log_likelihood1_proj, log_likelihood2_proj.reshape(batchsize, -1)], dim=1
-        ).sum(dim=1, keepdim=True)
+        log_likelihood_proj = sum_observational_and_counterfactual(
+            log_likelihood1_proj, log_likelihood2_proj
+        )
         assert torch.all(torch.isfinite(log_likelihood_proj))
 
         # Compute MSE
-        # mse_proj = torch.sum((x1_reco_proj - x1) ** 2, feature_dims).unsqueeze(1)
-        # mse_proj += torch.sum((x2_reco_proj - x2) ** 2, feature_dims).unsqueeze(1)
-        mse_proj = torch.concatenate(
-            [
-                torch.sum((x1_reco_proj - x1) ** 2, feature_dims).unsqueeze(1),
-                torch.sum((x2_reco_proj - x2) ** 2, feature_dims).reshape(batchsize, -1),
-            ],
-            dim=1,
-        ).sum(dim=1, keepdim=True)
+        mse_proj = sum_observational_and_counterfactual(
+            (x1_reco_proj - x1) ** 2, (x2_reco_proj - x2) ** 2, feature_dims=feature_dims
+        )
 
         # Compute inverse consistency MSE: |z - encode(decode(z))|^2
         e1_reencoded = self.encode_to_noise(x1_reco_proj, deterministic=False)
         e2_reencoded = self.encode_to_noise(x2_reco_proj, deterministic=False)
-        # inverse_consistency_mse_proj = torch.sum((e1_reencoded - e1_proj) ** 2, 1, keepdim=True)
-        # inverse_consistency_mse_proj += torch.sum((e2_reencoded - e2_proj) ** 2, 1, keepdim=True)
-        inverse_consistency_mse_proj = torch.concatenate(
-            [
-                torch.sum((e1_reencoded - e1_proj) ** 2, 1, keepdim=True),
-                torch.sum((e2_reencoded - e2_proj) ** 2, 1).reshape(batchsize, -1),
-            ],
-            dim=1,
-        ).sum(dim=1, keepdim=True)
+
+        inverse_consistency_mse_proj = sum_observational_and_counterfactual(
+            (e1_reencoded - e1_proj) ** 2, (e2_reencoded - e2_proj) ** 2
+        )
 
         # Expand to sequence length to match each e2 with corresponding e1
         if sequence_length is not None:
@@ -762,7 +743,7 @@ def sequence_to_batch(x_sequence):
 
 
 def batch_to_sequence(x, batchsize):
-    return x.reshape(batchsize, -1, x.shape[-1])  # (B, T, z_dim)
+    return x.reshape(batchsize, -1, *x.shape[1:])  # (B, T, *x_dim)
 
 
 def expand_observational_to_sequence_length(x, sequence_length):
