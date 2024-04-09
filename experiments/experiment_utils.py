@@ -531,14 +531,20 @@ def step_schedules(cfg, model, fractional_epoch):
     intervened_sequence_regularization_amount = None
     if "intervened_sequence_regularization_schedule" in cfg.training:
         intervened_sequence_regularization_amount = generic_scheduler(
-            cfg, cfg.training.intervened_sequence_regularization_schedule, fractional_epoch, default_value=0.0
+            cfg,
+            cfg.training.intervened_sequence_regularization_schedule,
+            fractional_epoch,
+            default_value=0.0,
         )
     unintervened_sequence_regularization_amount = None
     if "unintervened_sequence_regularization_schedule" in cfg.training:
         unintervened_sequence_regularization_amount = generic_scheduler(
-            cfg, cfg.training.unintervened_sequence_regularization_schedule, fractional_epoch, default_value=0.0
+            cfg,
+            cfg.training.unintervened_sequence_regularization_schedule,
+            fractional_epoch,
+            default_value=0.0,
         )
-    return (
+    values = (
         beta,
         beta_intervention,
         consistency_regularization_amount,
@@ -548,9 +554,12 @@ def step_schedules(cfg, model, fractional_epoch):
         z_regularization_amount,
         intervention_entropy_regularization_amount,
         intervention_encoder_offset,
-        intervened_sequence_regularization_amount,
-        unintervened_sequence_regularization_amount,
     )
+    if intervened_sequence_regularization_amount is not None:
+        values += (intervened_sequence_regularization_amount,)
+    if unintervened_sequence_regularization_amount is not None:
+        values += (unintervened_sequence_regularization_amount,)
+    return values
 
 
 def determine_graph_learning_settings(cfg, epoch, model):
