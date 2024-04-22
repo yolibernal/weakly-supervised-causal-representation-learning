@@ -6,7 +6,7 @@ import nflows.utils
 import torch
 from torch import nn
 
-from ws_crl.nets import make_mlp
+from ws_crl.nets import make_lipschitz_monotonic_mlp, make_mlp
 
 
 class MaskedSolutionTransform(nn.Module):
@@ -199,13 +199,13 @@ class ConditionalLinearTransform(nflows.transforms.Transform):
 
     def forward(self, inputs, context=None):
         scale, shift, logabsdet = self.get_scale_and_shift(context)
-        outputs = inputs * scale + shift
-        return outputs, logabsdet
+        outputs = (inputs - shift) / scale
+        return outputs, -logabsdet
 
     def inverse(self, inputs, context=None):
         scale, shift, logabsdet = self.get_scale_and_shift(context)
-        outputs = (inputs - shift) / scale
-        return outputs, -logabsdet
+        outputs = inputs * scale + shift
+        return outputs, logabsdet
 
 
 def make_intervention_transform(homoskedastic, enhance_causal_effects, min_std=None):
@@ -287,6 +287,50 @@ def make_mlp_structure_transform(
         nn.init.normal_(last_layer.weight[0, :], mean=0.0, std=log_std_weight_std)
         nn.init.normal_(last_layer.bias[1], mean=0.0, std=mean_bias_std)
         nn.init.normal_(last_layer.weight[1, :], mean=0.0, std=mean_weight_std)
+
+    structure_trf = ConditionalAffineScalarTransform(
+        param_net=param_net, features=1, conditional_std=not homoskedastic, min_scale=min_std
+    )
+
+    return structure_trf
+
+
+def make_lipschitz_monotonic_mlp_structure_transform(
+    dim_z,
+    hidden_layers,
+    hidden_units,
+    homoskedastic,
+    min_std,
+    concat_masks_to_parents=True,
+    initialization="default",
+    monotonic_constraints=None,
+    n_groups=2,
+    kind="one-inf",
+    lipschitz_const=1.0,
+):
+    """
+    Utility function that constructs an invertible transformation for causal mechanisms
+    in SCMs
+    """
+    input_factor = 2 if concat_masks_to_parents else 1
+    features = (
+        [input_factor * dim_z]
+        + [hidden_units for _ in range(hidden_layers)]
+        + [1 if homoskedastic else 2]
+    )
+    param_net = make_lipschitz_monotonic_mlp(
+        features,
+        monotonic_constraints=monotonic_constraints,
+        n_groups=n_groups,
+        kind=kind,
+        lipschitz_const=lipschitz_const,
+    )
+
+    # if monotonic_constraints is not None and monotonic_constraints != "none":
+    #     # Unwrap monotonic wrapper
+    #     last_layer = list(param_net.nn._modules.values())[-1]
+    # else:
+    #     last_layer = list(param_net._modules.values())[-1]
 
     structure_trf = ConditionalAffineScalarTransform(
         param_net=param_net, features=1, conditional_std=not homoskedastic, min_scale=min_std

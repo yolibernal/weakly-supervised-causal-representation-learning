@@ -12,6 +12,7 @@ from torch import nn
 from ws_crl.causal.graph import ENCOLearnedGraph, DDSLearnedGraph, FixedOrderLearnedGraph
 from ws_crl.transforms import (
     make_linear_structure_transform,
+    make_lipschitz_monotonic_mlp_structure_transform,
     make_mlp_structure_transform,
     MaskedSolutionTransform,
 )
@@ -417,6 +418,78 @@ class MLPImplicitSCM(ImplicitSCM):
                     homoskedastic,
                     min_std=min_std,
                     initialization="broad",
+                )
+            )
+
+        super().__init__(
+            graph,
+            solution_functions,
+            base_density,
+            manifold_thickness,
+            dim_z=dim_z,
+            causal_structure=causal_structure,
+        )
+
+
+class LipschitzMonotonicSCM(ImplicitSCM):
+    def __init__(
+        self,
+        graph_parameterization,
+        manifold_thickness,
+        dim_z,
+        hidden_layers=1,
+        hidden_units=100,
+        base_density=DEFAULT_BASE_DENSITY,
+        homoskedastic=True,
+        min_std=None,
+        monotonic_constraints=None,
+        n_groups=2,
+        kind="one-inf",
+        lipschitz_const=1.0,
+    ):
+        solution_functions = []
+
+        # Initialize graph
+        causal_structure = None
+        assert graph_parameterization in {
+            "enco",
+            "dds",
+            "fixed_order",
+            None,
+            "none",
+            "none_fixed_order",
+            "none_trivial",
+        }
+        if graph_parameterization == "enco":
+            graph = ENCOLearnedGraph(dim_z)
+        elif graph_parameterization == "dds":
+            graph = DDSLearnedGraph(dim_z)
+        elif graph_parameterization == "fixed_order":
+            graph = FixedOrderLearnedGraph(dim_z)
+        elif graph_parameterization == "none_fixed_order":
+            graph = None
+            causal_structure = "fixed_order"
+        elif graph_parameterization == "none_trivial":
+            graph = None
+            causal_structure = "trivial"
+        else:
+            graph = None
+            causal_structure = "none"
+
+        # Initialize transforms for p(e'|e)
+        for _ in range(dim_z):
+            solution_functions.append(
+                make_lipschitz_monotonic_mlp_structure_transform(
+                    dim_z,
+                    hidden_layers,
+                    hidden_units,
+                    homoskedastic,
+                    min_std=min_std,
+                    initialization="broad",
+                    monotonic_constraints=monotonic_constraints,
+                    n_groups=n_groups,
+                    kind=kind,
+                    lipschitz_const=lipschitz_const,
                 )
             )
 

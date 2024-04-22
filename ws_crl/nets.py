@@ -7,6 +7,7 @@ General-purpose neural networks
 
 import torch
 from torch import nn
+import monotonicnetworks as lmn
 
 
 class Quadratic(nn.Module):
@@ -58,6 +59,41 @@ def make_mlp(features, activation="relu", final_activation=None, initial_activat
 
         net = nn.Sequential(*layers)
 
+    else:
+        net = nn.Identity()
+
+    return net
+
+
+def make_lipschitz_monotonic_mlp(
+    features, monotonic_constraints=None, kind="one-inf", lipschitz_const=1.0, n_groups=2
+):
+    if len(features) >= 2:
+        layers = []
+        for in_, out in zip(features[:-2], features[1:-1]):
+            layers.append(
+                lmn.LipschitzLinear(in_, out, kind=kind, lipschitz_const=lipschitz_const),
+            )
+            layers.append(
+                lmn.GroupSort(n_groups=n_groups),
+            )
+        layers.append(
+            lmn.LipschitzLinear(
+                features[-2], features[-1], kind=kind, lipschitz_const=lipschitz_const
+            )
+        )
+
+        net = nn.Sequential(*layers)
+        if monotonic_constraints is not None and monotonic_constraints != "none":
+            if monotonic_constraints == "all":
+                # None applies monotonic constraints to all inputs
+                _monotonic_constraints = None
+            else:
+                assert isinstance(monotonic_constraints, list)
+                _monotonic_constraints = monotonic_constraints
+            net = lmn.MonotonicWrapper(
+                net, monotonic_constraints=_monotonic_constraints, lipschitz_const=lipschitz_const
+            )
     else:
         net = nn.Identity()
 

@@ -30,7 +30,7 @@ from experiments.experiment_utils import (
     determine_graph_learning_settings,
     frequency_check,
 )
-from ws_crl.causal.implicit_scm import LinearImplicitSCM, MLPImplicitSCM
+from ws_crl.causal.implicit_scm import LinearImplicitSCM, LipschitzMonotonicSCM, MLPImplicitSCM
 from ws_crl.causal.scm import (
     MLPFixedOrderSCM,
     MLPVariableOrderCausalModel,
@@ -38,11 +38,12 @@ from ws_crl.causal.scm import (
 )
 from ws_crl.encoder import GaussianEncoder
 from ws_crl.lcm import ELCM, ILCM, MonotonousEffectSequenceILCM
+from ws_crl.lcm.ilcm import sequence_to_batch
 from ws_crl.metrics import compute_dci
 from ws_crl.plotting import (
     plot_average_intervention_posterior,
     plot_counterfactuals,
-    plot_implicit_graph,
+    plot_graph,
     plot_importance_matrix,
     plot_latent_space,
     plot_noise_pairs,
@@ -55,7 +56,11 @@ from ws_crl.posthoc_graph_learning import (
     run_enco,
 )
 from ws_crl.training import VAEMetrics
-from ws_crl.utils import calculate_average_intervention_posterior, calculate_intervention_posteriors
+from ws_crl.utils import (
+    calculate_average_intervention_posterior,
+    calculate_intervention_posteriors,
+    generate_directed_graph_matrix,
+)
 
 
 @hydra.main(
@@ -174,6 +179,21 @@ def create_scm(cfg):
             dim_z=cfg.model.dim_z,
             min_std=cfg.model.scm.min_std,
         )
+    elif noise_centric and cfg.model.scm.type == "lipschitz_monotonic":
+        scm = LipschitzMonotonicSCM(
+            graph_parameterization=cfg.model.scm.adjacency_matrix,
+            manifold_thickness=cfg.model.scm.manifold_thickness,
+            hidden_units=cfg.model.scm.hidden_units,
+            hidden_layers=cfg.model.scm.hidden_layers,
+            homoskedastic=cfg.model.scm.homoskedastic,
+            dim_z=cfg.model.dim_z,
+            min_std=cfg.model.scm.min_std,
+            monotonic_constraints=cfg.model.scm.monotonic_constraints,
+            n_groups=cfg.model.scm.n_groups,
+            kind=cfg.model.scm.weight_constraint_kind,
+            lipschitz_const=cfg.model.scm.lipschitz_const,
+        )
+
     elif (
         not noise_centric
         and cfg.model.scm.type == "mlp"
@@ -552,6 +572,7 @@ def validation_loop(cfg, model, criteria, val_loader, best_state, val_metrics, s
 
     loss, nll, metrics = compute_metrics_on_dataset(cfg, model, criteria, val_loader, device)
     metrics.update(eval_dci_scores(cfg, model, test_loader=val_loader))
+    metrics.update(eval_dci_scores(cfg, model, test_loader=val_loader, interventional=True))
     metrics.update(eval_implicit_graph(cfg, model, dataloader=val_loader))
 
     # Store validation metrics (and track with MLflow)
@@ -564,6 +585,14 @@ def validation_loop(cfg, model, criteria, val_loader, best_state, val_metrics, s
         f"Step {step}: causal disentanglement = {metrics['causal_disentanglement']:.2f}, "
         f"noise disentanglement = {metrics['noise_disentanglement']:.2f}"
     )
+
+    if "interventional_causal_disentanglement" in metrics:
+        logger.info(
+            f"Step {step}: interventional causal disentanglement = "
+            f"{metrics['interventional_causal_disentanglement']:.2f}, "
+            f"interventional noise disentanglement = "
+            f"{metrics['interventional_noise_disentanglement']:.2f}"
+        )
 
     # Early stopping: compare val loss to last val loss
     new_val_loss = metrics["nll"] if cfg.training.early_stopping_var == "nll" else loss.item()
@@ -609,9 +638,19 @@ def plot_loop(cfg, model, loader, metrics, device, step):
             loader,
             MAP_interventions,
             device,
-            components=[4, 5],  # "TODO: get from cfg"
-            filename=plot_dir / f"latent_space_step_{step}.pdf",
-            artifact_folder="latent_space",
+            causal=False,
+            filename=plot_dir / f"latent_space_noise_step_{step}.pdf",
+            artifact_folder="latent_space_noise",
+        )
+        plot_latent_space(
+            cfg,
+            model,
+            loader,
+            MAP_interventions,
+            device,
+            causal=True,
+            filename=plot_dir / f"latent_space_causal_step_{step}.pdf",
+            artifact_folder="latent_space_causal",
         )
         plot_average_intervention_posterior(
             cfg,
@@ -644,11 +683,24 @@ def plot_loop(cfg, model, loader, metrics, device, step):
             filename=plot_dir / f"solution_function_responses_step_{step}.pdf",
             artifact_folder="solution_function_responses",
         )
-        plot_implicit_graph(
+        implicit_graph_adjacency_matrix = generate_directed_graph_matrix(
+            metrics, f"implicit_graph_"
+        )
+        plot_graph(
             cfg,
-            metrics,
+            adjacency_matrix=implicit_graph_adjacency_matrix,
+            MAP_interventions=MAP_interventions,
             filename=plot_dir / f"implicit_graph_step_{step}.pdf",
             artifact_folder="implicit_graph",
+        )
+
+        enco_adjacency_matrix = generate_directed_graph_matrix(metrics, f"enco_graph_")
+        plot_graph(
+            cfg,
+            enco_adjacency_matrix,
+            MAP_interventions,
+            filename=plot_dir / f"enco_graph_step_{step}.pdf",
+            artifact_folder="enco_graph",
         )
 
         # TODO: save noise encodings as e2 instead of counterfactual noise
@@ -664,7 +716,11 @@ def evaluate(cfg, model):
     logger.info("Starting evaluation")
 
     # Compute metrics
-    test_metrics = eval_dci_scores(cfg, model, partition=cfg.eval.eval_partition)
+    test_metrics = {}
+    test_metrics.update(eval_dci_scores(cfg, model, partition=cfg.eval.eval_partition))
+    test_metrics.update(
+        eval_dci_scores(cfg, model, partition=cfg.eval.eval_partition, interventional=True)
+    )
     test_metrics.update(eval_enco_graph(cfg, model, partition=cfg.eval.eval_partition))
     test_metrics.update(eval_implicit_graph(cfg, model, partition=cfg.eval.eval_partition))
     test_metrics.update(eval_test_metrics(cfg, model))
@@ -706,7 +762,14 @@ def eval_test_metrics(cfg, model):
 
 
 @torch.no_grad()
-def eval_dci_scores(cfg, model, partition="val", test_loader=None, full_importance_matrix=True):
+def eval_dci_scores(
+    cfg,
+    model,
+    partition="val",
+    test_loader=None,
+    full_importance_matrix=True,
+    interventional=False,
+):
     """Evaluates DCI scores"""
 
     model.eval()
@@ -720,24 +783,42 @@ def eval_dci_scores(cfg, model, partition="val", test_loader=None, full_importan
                 cfg, partition, cfg.eval.batchsize, include_noise_encodings=True
             )
 
-        model_z, true_z = [], []
-        model_e, true_e = [], []
+        model_zs, true_zs = [], []
+        model_es, true_es = [], []
 
-        for x_batch, _, true_z_batch, *_, true_e_batch, _ in dataloader:
-            x_batch = x_batch.to(device)
+        for (
+            x1,
+            x2_sequence,
+            true_z1,
+            true_z2_sequence,
+            *_,
+            true_e1,
+            true_e2_sequence,
+        ) in dataloader:
 
-            z_batch = model.encode_to_causal(x_batch, deterministic=True)
-            e_batch = model.encode_to_noise(x_batch, deterministic=True)
+            if not interventional:
+                x = x1
+                true_z = true_z1
+                true_e = true_e1
+            else:
+                x = sequence_to_batch(x2_sequence)
+                true_z = sequence_to_batch(true_z2_sequence)
+                true_e = sequence_to_batch(true_e2_sequence)
 
-            model_z.append(z_batch.to(out_device))
-            model_e.append(e_batch.to(out_device))
-            true_z.append(true_z_batch.to(out_device))
-            true_e.append(true_e_batch.to(out_device))
+            x = x.to(device)
 
-        model_z = torch.cat(model_z, dim=0).detach()
-        true_z = torch.cat(true_z, dim=0).detach()
-        model_e = torch.cat(model_e, dim=0).detach()
-        true_e = torch.cat(true_e, dim=0).detach()
+            z = model.encode_to_causal(x, deterministic=True)
+            e = model.encode_to_noise(x, deterministic=True)
+
+            model_zs.append(z.to(out_device))
+            model_es.append(e.to(out_device))
+            true_zs.append(true_z.to(out_device))
+            true_es.append(true_e.to(out_device))
+
+        model_z = torch.cat(model_zs, dim=0).detach()
+        true_z = torch.cat(true_zs, dim=0).detach()
+        model_e = torch.cat(model_es, dim=0).detach()
+        true_e = torch.cat(true_es, dim=0).detach()
         return true_z, model_z, true_e, model_e
 
     train_true_z, train_model_z, train_true_e, train_model_e = _load("dci_train", device, cpu)
@@ -752,6 +833,8 @@ def eval_dci_scores(cfg, model, partition="val", test_loader=None, full_importan
         test_model_z,
         return_full_importance_matrix=full_importance_matrix,
     )
+
+    # print(train_true_e.shape, train_model_e.shape, test_true_e.shape, test_model_e.shape)
     noise_dci_metrics = compute_dci(
         # HACK: remove after fixed data is uploaded
         # train_true_e,
@@ -765,9 +848,9 @@ def eval_dci_scores(cfg, model, partition="val", test_loader=None, full_importan
 
     combined_metrics = {}
     for key, val in noise_dci_metrics.items():
-        combined_metrics[f"noise_{key}"] = val
+        combined_metrics[f"{'interventional_' if interventional else ''}noise_{key}"] = val
     for key, val in causal_dci_metrics.items():
-        combined_metrics[f"causal_{key}"] = val
+        combined_metrics[f"{'interventional_' if interventional else ''}causal_{key}"] = val
 
     return combined_metrics
 

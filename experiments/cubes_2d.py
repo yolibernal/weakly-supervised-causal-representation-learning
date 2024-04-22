@@ -10,27 +10,27 @@ import mlflow
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from tqdm import trange
 
 from experiments.experiment_utils import (
-    initialize_experiment,
-    save_config,
-    save_model,
-    logger,
-    create_optimizer_and_scheduler,
-    set_manifold_thickness,
     compute_metrics_on_dataset,
-    reset_optimizer_state,
     create_intervention_encoder,
-    update_dict,
-    log_training_step,
-    optimizer_step,
-    step_schedules,
+    create_optimizer_and_scheduler,
     determine_graph_learning_settings,
     frequency_check,
+    initialize_experiment,
+    log_training_step,
+    logger,
+    optimizer_step,
+    reset_optimizer_state,
+    save_config,
+    save_model,
+    set_manifold_thickness,
+    step_schedules,
+    update_dict,
 )
-from ws_crl.causal.implicit_scm import MLPImplicitSCM
+from ws_crl.causal.implicit_scm import LinearImplicitSCM, LipschitzMonotonicSCM, MLPImplicitSCM
 from ws_crl.causal.scm import (
     MLPFixedOrderSCM,
     MLPVariableOrderCausalModel,
@@ -53,7 +53,10 @@ from ws_crl.posthoc_graph_learning import (
     run_enco,
 )
 from ws_crl.training import VAEMetrics
-from ws_crl.utils import calculate_average_intervention_posterior, calculate_intervention_posteriors
+from ws_crl.utils import (
+    calculate_average_intervention_posterior,
+    calculate_intervention_posteriors,
+)
 
 
 @hydra.main(
@@ -151,6 +154,27 @@ def create_scm(cfg):
             homoskedastic=cfg.model.scm.homoskedastic,
             dim_z=cfg.model.dim_z,
             min_std=cfg.model.scm.min_std,
+        )
+    elif noise_centric and cfg.model.scm.type == "linear":
+        scm = LinearImplicitSCM(
+            graph_parameterization=cfg.model.scm.adjacency_matrix,
+            manifold_thickness=cfg.model.scm.manifold_thickness,
+            homoskedastic=cfg.model.scm.homoskedastic,
+            dim_z=cfg.model.dim_z,
+            min_std=cfg.model.scm.min_std,
+        )
+    elif noise_centric and cfg.model.scm.type == "lipschitz_monotonic":
+        scm = LipschitzMonotonicSCM(
+            graph_parameterization=cfg.model.scm.adjacency_matrix,
+            manifold_thickness=cfg.model.scm.manifold_thickness,
+            hidden_units=cfg.model.scm.hidden_units,
+            hidden_layers=cfg.model.scm.hidden_layers,
+            homoskedastic=cfg.model.scm.homoskedastic,
+            dim_z=cfg.model.dim_z,
+            min_std=cfg.model.scm.min_std,
+            monotonic_constraints=cfg.model.scm.monotonic_constraints,
+            n_groups=cfg.model.scm.n_groups,
+            kind=cfg.model.scm.weight_constraint_kind,
         )
     elif (
         not noise_centric
@@ -442,14 +466,20 @@ def load_dataset(cfg, tag, include_noise_encodings=True, normalize=True):
     if not include_noise_encodings:
         data = list(data)
         data = data[:6]
+        e1, e2 = None, None
+    else:
+        e1, e2 = data[-2], data[-1]
 
-    x1, x2, *other = data
+    x1, x2, z1, z2, intervention_labels, true_interventions, *_ = data
 
     device = x1.device
 
     if len(x2.shape) > 2:
         logger.info("Choosing last sequence element as x2")
         x2 = x2[:, -1]
+        z2 = z2[:, -1]
+        if include_noise_encodings:
+            e2 = e2[:, -1]
 
     if normalize:
         x1_mean, x1_std, x2_mean, x2_std = get_train_mean_std(cfg)
@@ -464,6 +494,10 @@ def load_dataset(cfg, tag, include_noise_encodings=True, normalize=True):
 
         x1 = (x1 - x_mean) / x_std
         x2 = (x2 - x_mean) / x_std
+
+    other = [z1, z2, intervention_labels, true_interventions]
+    if include_noise_encodings:
+        other.extend([e1, e2])
 
     dataset = TensorDataset(x1, x2, *other)
     return dataset
@@ -557,7 +591,6 @@ def plot_loop(cfg, model, loader, metrics, device, step):
             loader,
             MAP_interventions,
             device,
-            components=[4, 5],  # TODO: get from cfg
             filename=plot_dir / f"latent_space_step_{step}.pdf",
             artifact_folder="latent_space",
         )
