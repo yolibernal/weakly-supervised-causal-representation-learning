@@ -1,0 +1,21 @@
+dataset: sequence_reduced_dim
+type: xy_pairs
+
+encoder:
+  type: son
+  path: '${data.data_dir}/encoder.pt'
+
+dim_x: 6
+dim_z: 6
+
+sequence_length: 1
+
+noise: 0
+
+normalize: true
+x1_mean: null
+x2_mean: null
+x1_std: null
+x2_std: null
+
+data_dir: ???

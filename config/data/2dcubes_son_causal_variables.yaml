@@ -1,13 +1,12 @@
 dataset: 2dcubes
-type: image
+type: xy_pairs
 
-dim_x: 16
+dim_x: 6
 dim_z: 6
 
 encoder:
-  type: sbd
-  exp_dir: /mnt/raid/ni/jonasb/wscrl/debug_2dcubes_reduce_dim
-  model_name: model.pt
+  type: son
+  path: '${data.data_dir}/encoder.pt'
 
 noise: 0
 
