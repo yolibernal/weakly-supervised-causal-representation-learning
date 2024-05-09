@@ -407,6 +407,80 @@ class ConditionalLinearTransform(nflows.transforms.Transform):
         return outputs, logabsdet
 
 
+def batch_jacobian(g, x):
+    jac = []
+    for d in range(g.shape[1]):
+        jac.append(
+            torch.autograd.grad(torch.sum(g[:, d]), x, create_graph=True)[0].view(
+                x.shape[0], 1, x.shape[1]
+            )
+        )
+    return torch.cat(jac, dim=1)
+
+
+class ConditionaliResBlock(nn.Module):
+    def __init__(
+        self,
+        net,
+    ):
+        nn.Module.__init__(self)
+        self.net = net
+
+    def forward(self, x, context=None):
+        g, logabsdet = self._logdetgrad(x, context=context)
+        return x + g, -logabsdet
+
+    def inverse(self, y, context=None):
+        x = self._inverse_fixed_point(y, context=context)
+        return x, self._logdetgrad(x, context=context)[1]
+
+    def _inverse_fixed_point(self, y, atol=1e-5, rtol=1e-5, context=None):
+        x, x_prev = y - self.net(y, context=context), y
+        i = 0
+        tol = atol + y.abs() * rtol
+        while not torch.all((x - x_prev) ** 2 / tol < 1):
+            x, x_prev = y - self.net(x, context=context), x
+            i += 1
+            if i > 1000:
+                break
+        return x
+
+    def _logdetgrad(self, x, context=None):
+        """Returns g(x) and ```logdet|d(x+g(x))/dx|```"""
+        assert x.ndimension() == 2
+
+        with torch.enable_grad():
+            # Brute-force compute Jacobian determinant.
+            x = x.requires_grad_(True)
+            g = self.net(x, context=context)
+            jac = batch_jacobian(g, x)
+            if jac.shape[1] == 1:
+                batch_dets = jac[:, 0, 0] + 1
+            elif jac.shape[1] == 2:
+                batch_dets = (jac[:, 0, 0] + 1) * (jac[:, 1, 1] + 1) - jac[:, 0, 1] * jac[:, 1, 0]
+            else:
+                raise ValueError(f"Unsupported number of dimensions: {jac.shape[1]}")
+            return g, torch.log(torch.abs(batch_dets)).view(-1, 1)
+
+
+class ConditionalResidualTransform(nflows.transforms.Transform):
+    def __init__(self, net) -> None:
+        super().__init__()
+
+        self.iresblock = ConditionaliResBlock(net=net)
+
+    def forward(self, inputs, context=None):
+        # outputs, logabsdet = self.iresblock.forward(inputs, context=context)
+        outputs, logabsdet = self.iresblock.inverse(inputs, context=context)
+        return outputs, -logabsdet
+
+    def inverse(self, inputs, context=None):
+        # outputs, logabsdet = self.iresblock.inverse(inputs, context=context)
+        outputs, logabsdet = self.iresblock.forward(inputs, context=context)
+        return outputs, -logabsdet
+
+
+
 def make_intervention_transform(homoskedastic, enhance_causal_effects, min_std=None):
     """
     Utility function that constructs an invertible transformation for interventional distributions
