@@ -35,7 +35,14 @@ class ImplicitSCM(nn.Module):
     """
 
     def __init__(
-        self, graph, solution_functions, base_density, manifold_thickness, dim_z, causal_structure
+        self,
+        graph,
+        solution_functions,
+        base_density,
+        manifold_thickness,
+        dim_z,
+        causal_structure,
+        concat_masks_to_parents=True,
     ):
         super().__init__()
         self.dim_z = dim_z
@@ -47,6 +54,7 @@ class ImplicitSCM(nn.Module):
         self.register_buffer("topological_order", torch.zeros(dim_z, dtype=torch.long))
 
         self.set_causal_structure(graph, causal_structure)
+        self.concat_masks_to_parents = concat_masks_to_parents
 
     def sample(self, n, intervention=None, graph_mode="hard", graph_temperature=1.0):
         """Samples a single latent vector, either observed or under an intervention"""
@@ -291,7 +299,9 @@ class ImplicitSCM(nn.Module):
         )
         dummy_data = self._mask_values.unsqueeze(0)
         dummy_data[:, i] = 0.0
-        masked_epsilon = mask(epsilon, mask_, mask_data=dummy_data)
+        masked_epsilon = mask(
+            epsilon, mask_, mask_data=dummy_data, concat_mask=self.concat_masks_to_parents
+        )
         return masked_epsilon
 
     def _get_ancestor_mask(self, i, adjacency_matrix, device, n=1):
@@ -380,6 +390,7 @@ class MLPImplicitSCM(ImplicitSCM):
         min_std=None,
         transform_type="affine",
         n_transforms=1,
+        concat_masks_to_parents=True,
     ):
         solution_functions = []
 
@@ -422,6 +433,7 @@ class MLPImplicitSCM(ImplicitSCM):
                     initialization="broad",
                     transform_type=transform_type,
                     n_transforms=n_transforms,
+                    concat_masks_to_parents=concat_masks_to_parents,
                 )
             )
 
@@ -432,6 +444,7 @@ class MLPImplicitSCM(ImplicitSCM):
             manifold_thickness,
             dim_z=dim_z,
             causal_structure=causal_structure,
+            concat_masks_to_parents=concat_masks_to_parents,
         )
 
 
@@ -452,6 +465,7 @@ class LipschitzMonotonicSCM(ImplicitSCM):
         lipschitz_const=1.0,
         transform_type="affine",
         n_transforms=1,
+        concat_masks_to_parents=True,
     ):
         solution_functions = []
 
@@ -498,6 +512,7 @@ class LipschitzMonotonicSCM(ImplicitSCM):
                     lipschitz_const=lipschitz_const,
                     transform_type=transform_type,
                     n_transforms=n_transforms,
+                    concat_masks_to_parents=concat_masks_to_parents,
                 )
             )
 
@@ -508,6 +523,7 @@ class LipschitzMonotonicSCM(ImplicitSCM):
             manifold_thickness,
             dim_z=dim_z,
             causal_structure=causal_structure,
+            concat_masks_to_parents=concat_masks_to_parents,
         )
 
 
@@ -520,6 +536,7 @@ class LinearImplicitSCM(ImplicitSCM):
         base_density=DEFAULT_BASE_DENSITY,
         homoskedastic=True,
         min_std=None,
+        concat_masks_to_parents=True,
     ):
         solution_functions = []
 
@@ -558,6 +575,7 @@ class LinearImplicitSCM(ImplicitSCM):
                     homoskedastic,
                     min_std=min_std,
                     initialization="broad",
+                    concat_masks_to_parents=concat_masks_to_parents,
                 )
             )
 
@@ -568,4 +586,5 @@ class LinearImplicitSCM(ImplicitSCM):
             manifold_thickness,
             dim_z=dim_z,
             causal_structure=causal_structure,
+            concat_masks_to_parents=concat_masks_to_parents,
         )
