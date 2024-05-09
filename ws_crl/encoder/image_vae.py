@@ -63,6 +63,7 @@ class AddCoords(nn.Module):
     """
     Add coordinate encodings to a tensor
     """
+
     def __init__(self, h, w) -> None:
         super().__init__()
         x = torch.linspace(-1, 1, h)
@@ -177,8 +178,8 @@ def vector_to_gaussian(x, min_std=0.0, fix_std=False):
         std = min_std * torch.ones_like(x)
     else:
         d = x.shape[1] // 2
-        mu, std_param = x[:, :d], x[:, d:]
-        std = F.softplus(std_param) + min_std
+        mu, logvar_params = x[:, :d], x[:, d:]
+        std = torch.exp(0.5 * logvar_params) + min_std
 
     return mu, std
 
@@ -201,8 +202,13 @@ class BaseImageEncoder(nn.Module):
     ):
         super().__init__()
 
-        hidden_units = [mlp_hidden] * mlp_layers + [2 * out_features]
-        self.mlp = make_mlp(hidden_units, activation="leaky_relu", initial_activation="leaky_relu")
+        hidden_units = [mlp_hidden] * mlp_layers + [out_features]
+        self.mlp_mu = make_mlp(
+            hidden_units, activation="leaky_relu", initial_activation="leaky_relu"
+        )
+        self.mlp_logvar = make_mlp(
+            hidden_units, activation="leaky_relu", initial_activation="leaky_relu"
+        )
         self.register_buffer("min_std", torch.tensor(min_std))
 
         self.elementwise = make_elementwise_mlp(
@@ -246,8 +252,9 @@ class BaseImageEncoder(nn.Module):
     def mean_std(self, x):
         """Encode image, return mean and std"""
         hidden = self.net(x).squeeze(3).squeeze(2)
-        hidden = self.mlp(hidden)
-        mean, std = vector_to_gaussian(hidden, min_std=self.min_std)
+        mean = self.mlp_mu(hidden)
+        logvar = self.mlp_logvar(hidden)
+        std = torch.exp(0.5 * logvar) + self.min_std
 
         mean = self.elementwise(mean)
 
@@ -264,7 +271,8 @@ class BaseImageEncoder(nn.Module):
 
     def freezable_parameters(self):
         """Returns parameters that should be frozen during training"""
-        return chain(self.mlp.parameters(), self.net.parameters())
+        # return chain(self.mlp.parameters(), self.net.parameters())
+        return chain(self.mlp_mu.parameters(), self.mlp_logvar.parameters(), self.net.parameters())
 
     def unfreezable_parameters(self):
         """Returns parameters that should not be frozen during training"""
@@ -335,11 +343,9 @@ class ImageConvEncoder(BaseImageEncoder):
                 nn.LeakyReLU(),
                 conv_class(8 * hidden_features, 8 * hidden_features, **kwargs),
                 nn.LeakyReLU(),
-                conv_class(8 * hidden_features, 8 * hidden_features, **kwargs),
-                # conv_class(8 * hidden_features, 16 * hidden_features, **kwargs),
+                conv_class(8 * hidden_features, 16 * hidden_features, **kwargs),
                 nn.LeakyReLU(),
-                conv_class(8 * hidden_features, net_out_features, 1),
-                # conv_class(16 * hidden_features, net_out_features, 1),
+                conv_class(16 * hidden_features, net_out_features, 1),
             )
         elif in_resolution == 128:
             net = nn.Sequential(
