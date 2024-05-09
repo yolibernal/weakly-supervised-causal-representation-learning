@@ -30,7 +30,11 @@ from experiments.experiment_utils import (
     step_schedules,
     update_dict,
 )
-from ws_crl.causal.implicit_scm import LinearImplicitSCM, LipschitzMonotonicSCM, MLPImplicitSCM
+from ws_crl.causal.implicit_scm import (
+    LinearImplicitSCM,
+    LipschitzMonotonicSCM,
+    MLPImplicitSCM,
+)
 from ws_crl.causal.scm import (
     MLPFixedOrderSCM,
     MLPVariableOrderCausalModel,
@@ -42,6 +46,7 @@ from ws_crl.metrics import compute_dci
 from ws_crl.plotting import (
     plot_average_intervention_posterior,
     plot_counterfactuals,
+    plot_graph,
     plot_importance_matrix,
     plot_latent_space,
     plot_reconstructions,
@@ -56,6 +61,7 @@ from ws_crl.training import VAEMetrics
 from ws_crl.utils import (
     calculate_average_intervention_posterior,
     calculate_intervention_posteriors,
+    generate_directed_graph_matrix,
 )
 
 
@@ -154,6 +160,32 @@ def create_scm(cfg):
             homoskedastic=cfg.model.scm.homoskedastic,
             dim_z=cfg.model.dim_z,
             min_std=cfg.model.scm.min_std,
+            n_transforms=cfg.model.scm.n_transforms if "n_transforms" in cfg.model.scm else 1,
+            concat_masks_to_parents=(
+                cfg.model.scm.concat_masks_to_parents
+                if "concat_masks_to_parents" in cfg.model.scm
+                else True
+            ),
+        )
+    elif noise_centric and cfg.model.scm.type == "sparse_mlp":
+        logger.info(
+            f"Graph parameterization for noise-centric learning: {cfg.model.scm.adjacency_matrix}"
+        )
+        scm = MLPImplicitSCM(
+            graph_parameterization=cfg.model.scm.adjacency_matrix,
+            manifold_thickness=cfg.model.scm.manifold_thickness,
+            hidden_units=cfg.model.scm.hidden_units,
+            hidden_layers=cfg.model.scm.hidden_layers,
+            homoskedastic=cfg.model.scm.homoskedastic,
+            dim_z=cfg.model.dim_z,
+            min_std=cfg.model.scm.min_std,
+            transform_type="sparse_affine",
+            n_transforms=cfg.model.scm.n_transforms if "n_transforms" in cfg.model.scm else 1,
+            concat_masks_to_parents=(
+                cfg.model.scm.concat_masks_to_parents
+                if "concat_masks_to_parents" in cfg.model.scm
+                else True
+            ),
         )
     elif noise_centric and cfg.model.scm.type == "linear":
         scm = LinearImplicitSCM(
@@ -162,6 +194,12 @@ def create_scm(cfg):
             homoskedastic=cfg.model.scm.homoskedastic,
             dim_z=cfg.model.dim_z,
             min_std=cfg.model.scm.min_std,
+            n_transforms=cfg.model.scm.n_transforms if "n_transforms" in cfg.model.scm else 1,
+            concat_masks_to_parents=(
+                cfg.model.scm.concat_masks_to_parents
+                if "concat_masks_to_parents" in cfg.model.scm
+                else True
+            ),
         )
     elif noise_centric and cfg.model.scm.type == "lipschitz_monotonic":
         scm = LipschitzMonotonicSCM(
@@ -175,6 +213,55 @@ def create_scm(cfg):
             monotonic_constraints=cfg.model.scm.monotonic_constraints,
             n_groups=cfg.model.scm.n_groups,
             kind=cfg.model.scm.weight_constraint_kind,
+            lipschitz_const=cfg.model.scm.lipschitz_const,
+            n_transforms=cfg.model.scm.n_transforms if "n_transforms" in cfg.model.scm else 1,
+            concat_masks_to_parents=(
+                cfg.model.scm.concat_masks_to_parents
+                if "concat_masks_to_parents" in cfg.model.scm
+                else True
+            ),
+        )
+    elif noise_centric and cfg.model.scm.type == "sparse_lipschitz_monotonic":
+        scm = LipschitzMonotonicSCM(
+            graph_parameterization=cfg.model.scm.adjacency_matrix,
+            manifold_thickness=cfg.model.scm.manifold_thickness,
+            hidden_units=cfg.model.scm.hidden_units,
+            hidden_layers=cfg.model.scm.hidden_layers,
+            homoskedastic=cfg.model.scm.homoskedastic,
+            dim_z=cfg.model.dim_z,
+            min_std=cfg.model.scm.min_std,
+            monotonic_constraints=cfg.model.scm.monotonic_constraints,
+            n_groups=cfg.model.scm.n_groups,
+            kind=cfg.model.scm.weight_constraint_kind,
+            lipschitz_const=cfg.model.scm.lipschitz_const,
+            transform_type="sparse_affine",
+            n_transforms=cfg.model.scm.n_transforms if "n_transforms" in cfg.model.scm else 1,
+            concat_masks_to_parents=(
+                cfg.model.scm.concat_masks_to_parents
+                if "concat_masks_to_parents" in cfg.model.scm
+                else True
+            ),
+        )
+    elif noise_centric and cfg.model.scm.type == "residual_lipschitz_monotonic":
+        scm = LipschitzMonotonicSCM(
+            graph_parameterization=cfg.model.scm.adjacency_matrix,
+            manifold_thickness=cfg.model.scm.manifold_thickness,
+            hidden_units=cfg.model.scm.hidden_units,
+            hidden_layers=cfg.model.scm.hidden_layers,
+            homoskedastic=cfg.model.scm.homoskedastic,
+            dim_z=cfg.model.dim_z,
+            min_std=cfg.model.scm.min_std,
+            monotonic_constraints=cfg.model.scm.monotonic_constraints,
+            n_groups=cfg.model.scm.n_groups,
+            kind=cfg.model.scm.weight_constraint_kind,
+            lipschitz_const=cfg.model.scm.lipschitz_const,
+            transform_type="residual",
+            n_transforms=cfg.model.scm.n_transforms if "n_transforms" in cfg.model.scm else 1,
+            concat_masks_to_parents=(
+                cfg.model.scm.concat_masks_to_parents
+                if "concat_masks_to_parents" in cfg.model.scm
+                else True
+            ),
         )
     elif (
         not noise_centric
@@ -304,6 +391,7 @@ def train(cfg, model):
                 z_regularization_amount,
                 intervention_entropy_regularization_amount,
                 intervention_encoder_offset,
+                solution_function_regularization_amount,
                 *_,
             ) = step_schedules(cfg, model, fractional_epoch)
 
@@ -343,6 +431,7 @@ def train(cfg, model):
                 consistency_regularization_amount=consistency_regularization_amount,
                 inverse_consistency_regularization_amount=inverse_consistency_regularization_amount,
                 intervention_entropy_regularization_amount=intervention_entropy_regularization_amount,
+                solution_function_regularization_amount=solution_function_regularization_amount,
                 **model_outputs,
             )
 
@@ -591,8 +680,19 @@ def plot_loop(cfg, model, loader, metrics, device, step):
             loader,
             MAP_interventions,
             device,
-            filename=plot_dir / f"latent_space_step_{step}.pdf",
-            artifact_folder="latent_space",
+            causal=False,
+            filename=plot_dir / f"latent_space_noise_step_{step}.pdf",
+            artifact_folder="latent_space_noise",
+        )
+        plot_latent_space(
+            cfg,
+            model,
+            loader,
+            MAP_interventions,
+            device,
+            causal=True,
+            filename=plot_dir / f"latent_space_causal_step_{step}.pdf",
+            artifact_folder="latent_space_causal",
         )
         plot_average_intervention_posterior(
             cfg,
@@ -624,6 +724,25 @@ def plot_loop(cfg, model, loader, metrics, device, step):
             device,
             filename=plot_dir / f"solution_function_responses_step_{step}.pdf",
             artifact_folder="solution_function_responses",
+        )
+        implicit_graph_adjacency_matrix = generate_directed_graph_matrix(
+            metrics, f"implicit_graph_"
+        )
+        plot_graph(
+            cfg,
+            adjacency_matrix=implicit_graph_adjacency_matrix,
+            MAP_interventions=MAP_interventions,
+            filename=plot_dir / f"implicit_graph_step_{step}.pdf",
+            artifact_folder="implicit_graph",
+        )
+
+        enco_adjacency_matrix = generate_directed_graph_matrix(metrics, f"enco_graph_")
+        plot_graph(
+            cfg,
+            enco_adjacency_matrix,
+            MAP_interventions,
+            filename=plot_dir / f"enco_graph_step_{step}.pdf",
+            artifact_folder="enco_graph",
         )
 
 

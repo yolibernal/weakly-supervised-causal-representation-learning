@@ -544,6 +544,14 @@ def step_schedules(cfg, model, fractional_epoch):
             fractional_epoch,
             default_value=0.0,
         )
+    solution_function_regularization_amount = None
+    if "solution_function_regularization_schedule" in cfg.training:
+        solution_function_regularization_amount = generic_scheduler(
+            cfg,
+            cfg.training.solution_function_regularization_schedule,
+            fractional_epoch,
+            default_value=0.0,
+        )
     values = (
         beta,
         beta_intervention,
@@ -559,6 +567,8 @@ def step_schedules(cfg, model, fractional_epoch):
         values += (intervened_sequence_regularization_amount,)
     if unintervened_sequence_regularization_amount is not None:
         values += (unintervened_sequence_regularization_amount,)
+    if solution_function_regularization_amount is not None:
+        values += (solution_function_regularization_amount,)
     return values
 
 

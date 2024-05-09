@@ -51,6 +51,7 @@ class VAEMetrics(nn.Module):
         intervention_entropy_regularization_amount=0.0,
         intervened_sequence_regularization_amount=None,
         unintervened_sequence_regularization_amount=None,
+        solution_function_regularization_amount=None,
         **model_outputs,
     ):
         metrics = {}
@@ -75,6 +76,7 @@ class VAEMetrics(nn.Module):
             cyclicity_regularization_amount,
             intervened_sequence_regularization_amount,
             unintervened_sequence_regularization_amount,
+            solution_function_regularization_amount
         )
 
         assert torch.isfinite(loss)
@@ -118,6 +120,7 @@ class VAEMetrics(nn.Module):
         cyclicity_regularization_amount,
         intervened_sequence_regularization_amount,
         unintervened_sequence_regularization_amount,
+        solution_function_regularization_amount
     ):
         if edge_regularization_amount is not None and "edges" in model_outputs:
             loss += edge_regularization_amount * torch.mean(model_outputs["edges"])
@@ -157,6 +160,16 @@ class VAEMetrics(nn.Module):
             )
             metrics["unintervened_sequence_loss"] = mean_unintervened_sequence_loss.item()
             loss += unintervened_sequence_regularization_amount * mean_unintervened_sequence_loss
+
+        if (
+            solution_function_regularization_amount is not None
+            and "solution_function_regularization" in model_outputs
+        ):
+            mean_solution_function_regularization = torch.mean(
+                model_outputs["solution_function_regularization"]
+            )
+            metrics["solution_function_regularization"] = mean_solution_function_regularization.item()
+            loss += solution_function_regularization_amount * mean_solution_function_regularization
 
         if (
             intervention_entropy_regularization_amount is not None
