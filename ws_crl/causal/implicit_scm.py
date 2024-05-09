@@ -378,6 +378,8 @@ class MLPImplicitSCM(ImplicitSCM):
         base_density=DEFAULT_BASE_DENSITY,
         homoskedastic=True,
         min_std=None,
+        transform_type="affine",
+        n_transforms=1,
     ):
         solution_functions = []
 
@@ -418,6 +420,8 @@ class MLPImplicitSCM(ImplicitSCM):
                     homoskedastic,
                     min_std=min_std,
                     initialization="broad",
+                    transform_type=transform_type,
+                    n_transforms=n_transforms,
                 )
             )
 
@@ -446,6 +450,8 @@ class LipschitzMonotonicSCM(ImplicitSCM):
         n_groups=2,
         kind="one-inf",
         lipschitz_const=1.0,
+        transform_type="affine",
+        n_transforms=1,
     ):
         solution_functions = []
 
@@ -490,6 +496,8 @@ class LipschitzMonotonicSCM(ImplicitSCM):
                     n_groups=n_groups,
                     kind=kind,
                     lipschitz_const=lipschitz_const,
+                    transform_type=transform_type,
+                    n_transforms=n_transforms,
                 )
             )
 

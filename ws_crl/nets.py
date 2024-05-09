@@ -27,6 +27,19 @@ class Quadratic(nn.Module):
         return outputs
 
 
+class ConditionalWrapper(nn.Module):
+    """Wrapper that adds a context to the input of a neural network"""
+
+    def __init__(self, net):
+        super().__init__()
+        self.net = net
+
+    def forward(self, inputs, context=None):
+        if context is not None:
+            inputs = torch.cat([inputs, context], dim=1)
+        return self.net(inputs)
+
+
 def get_activation(key):
     """Utility function that returns an activation function given its name"""
 
@@ -62,11 +75,17 @@ def make_mlp(features, activation="relu", final_activation=None, initial_activat
     else:
         net = nn.Identity()
 
+    net = ConditionalWrapper(net)
+
     return net
 
 
 def make_lipschitz_monotonic_mlp(
-    features, monotonic_constraints=None, kind="one-inf", lipschitz_const=1.0, n_groups=2
+    features,
+    monotonic_constraints=None,
+    kind="one-inf",
+    lipschitz_const=1.0,
+    n_groups=2,
 ):
     if len(features) >= 2:
         layers = []
@@ -84,19 +103,14 @@ def make_lipschitz_monotonic_mlp(
         )
 
         net = nn.Sequential(*layers)
-        if monotonic_constraints is not None and monotonic_constraints != "none":
-            if monotonic_constraints == "all":
-                # None applies monotonic constraints to all inputs
-                _monotonic_constraints = None
-            else:
-                assert isinstance(monotonic_constraints, list)
-                _monotonic_constraints = monotonic_constraints
+        if monotonic_constraints is not None:
             net = lmn.MonotonicWrapper(
-                net, monotonic_constraints=_monotonic_constraints, lipschitz_const=lipschitz_const
+                net, monotonic_constraints=monotonic_constraints, lipschitz_const=lipschitz_const
             )
     else:
         net = nn.Identity()
 
+    net = ConditionalWrapper(net)
     return net
 
 

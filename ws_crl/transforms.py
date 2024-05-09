@@ -480,6 +480,25 @@ class ConditionalResidualTransform(nflows.transforms.Transform):
         return outputs, -logabsdet
 
 
+class NormalizingFlow(nn.Module):
+    def __init__(self, transforms) -> None:
+        super().__init__()
+        self.transforms = nn.ModuleList(transforms)
+
+    def forward(self, inputs, context=None):
+        logabsdet = torch.zeros(inputs.shape[0], 1, device=inputs.device)
+        for transform in self.transforms:
+            inputs, logdet = transform.forward(inputs, context=context)
+            logabsdet += logdet
+        return inputs, logabsdet
+
+    def inverse(self, inputs, context=None):
+        logabsdet = torch.zeros(inputs.shape[0], 1, device=inputs.device)
+        for transform in reversed(self.transforms):
+            inputs, logdet = transform.inverse(inputs, context=context)
+            logabsdet += logdet
+        return inputs, logabsdet
+
 
 def make_intervention_transform(homoskedastic, enhance_causal_effects, min_std=None):
     """
@@ -504,6 +523,8 @@ def make_mlp_structure_transform(
     min_std,
     concat_masks_to_parents=True,
     initialization="default",
+    transform_type="affine",
+    n_transforms=1,
 ):
     """
     Utility function that constructs an invertible transformation for causal mechanisms
@@ -515,55 +536,72 @@ def make_mlp_structure_transform(
         + [hidden_units for _ in range(hidden_layers)]
         + [1 if homoskedastic else 2]
     )
-    param_net = make_mlp(features)
 
-    if initialization == "default":
-        # param_net outputs mean and log std parameters of a Gaussian (log std only if
-        # homoskedastic = False), as a function of the causal parents.
-        # We usually want to initialize param_net such that:
-        #  - log std is very close to zero
-        #  - mean is reasonably close to zero, but may already have some nontrivial dependence on
-        #    the parents
-        mean_bias_std = 1.0e-3
-        mean_weight_std = 0.1
-        log_std_bias_std = 1.0e-6
-        log_std_weight_std = 1.0e-3
-        log_std_bias_mean = 0.0
-    elif initialization == "strong_effects":
-        # However, when creating a GT model as an initialized neural SCM, we want slightly more
-        # interesting initializations, with pronounced causal effects. That's what the
-        # enhance_causal_effects keyword is for. When that's True, we would like the Gaussian mean
-        # to depend quite strongly on the parents, and also would appreciate some non-trivial
-        # heteroskedasticity (log std depending on the parents).
-        mean_bias_std = 0.2
-        mean_weight_std = 1.5
-        log_std_bias_std = 1.0e-6
-        log_std_weight_std = 0.1
-        log_std_bias_mean = 0.0
-    elif initialization == "broad":
-        # For noise-centric models we want that the typical initial standard deviation in p(e2 | e1)
-        # is large, around 10
-        mean_bias_std = 1.0e-3
-        mean_weight_std = 0.1
-        log_std_bias_std = 1.0e-6
-        log_std_weight_std = 1.0e-3
-        log_std_bias_mean = 2.3
-    else:
-        raise ValueError(f"Unknown initialization scheme {initialization}")
+    transforms = []
+    for _ in range(n_transforms):
+        param_net = make_mlp(features)
 
-    last_layer = list(param_net._modules.values())[-1]
-    if homoskedastic:
-        nn.init.normal_(last_layer.bias, mean=0.0, std=mean_bias_std)
-        nn.init.normal_(last_layer.weight, mean=0.0, std=mean_weight_std)
-    else:
-        nn.init.normal_(last_layer.bias[0], mean=log_std_bias_mean, std=log_std_bias_std)
-        nn.init.normal_(last_layer.weight[0, :], mean=0.0, std=log_std_weight_std)
-        nn.init.normal_(last_layer.bias[1], mean=0.0, std=mean_bias_std)
-        nn.init.normal_(last_layer.weight[1, :], mean=0.0, std=mean_weight_std)
+        if initialization == "default":
+            # param_net outputs mean and log std parameters of a Gaussian (log std only if
+            # homoskedastic = False), as a function of the causal parents.
+            # We usually want to initialize param_net such that:
+            #  - log std is very close to zero
+            #  - mean is reasonably close to zero, but may already have some nontrivial dependence on
+            #    the parents
+            mean_bias_std = 1.0e-3
+            mean_weight_std = 0.1
+            log_std_bias_std = 1.0e-6
+            log_std_weight_std = 1.0e-3
+            log_std_bias_mean = 0.0
+        elif initialization == "strong_effects":
+            # However, when creating a GT model as an initialized neural SCM, we want slightly more
+            # interesting initializations, with pronounced causal effects. That's what the
+            # enhance_causal_effects keyword is for. When that's True, we would like the Gaussian mean
+            # to depend quite strongly on the parents, and also would appreciate some non-trivial
+            # heteroskedasticity (log std depending on the parents).
+            mean_bias_std = 0.2
+            mean_weight_std = 1.5
+            log_std_bias_std = 1.0e-6
+            log_std_weight_std = 0.1
+            log_std_bias_mean = 0.0
+        elif initialization == "broad":
+            # For noise-centric models we want that the typical initial standard deviation in p(e2 | e1)
+            # is large, around 10
+            mean_bias_std = 1.0e-3
+            mean_weight_std = 0.1
+            log_std_bias_std = 1.0e-6
+            log_std_weight_std = 1.0e-3
+            log_std_bias_mean = 2.3
+        else:
+            raise ValueError(f"Unknown initialization scheme {initialization}")
 
-    structure_trf = ConditionalAffineScalarTransform(
-        param_net=param_net, features=1, conditional_std=not homoskedastic, min_scale=min_std
-    )
+        last_layer = list(param_net._modules.values())[-1]
+        if homoskedastic:
+            nn.init.normal_(last_layer.bias, mean=0.0, std=mean_bias_std)
+            nn.init.normal_(last_layer.weight, mean=0.0, std=mean_weight_std)
+        else:
+            nn.init.normal_(last_layer.bias[0], mean=log_std_bias_mean, std=log_std_bias_std)
+            nn.init.normal_(last_layer.weight[0, :], mean=0.0, std=log_std_weight_std)
+            nn.init.normal_(last_layer.bias[1], mean=0.0, std=mean_bias_std)
+            nn.init.normal_(last_layer.weight[1, :], mean=0.0, std=mean_weight_std)
+
+        if transform_type == "affine":
+            transform = ConditionalAffineScalarTransform(
+                param_net=param_net,
+                features=1,
+                conditional_std=not homoskedastic,
+                min_scale=min_std,
+            )
+        elif transform_type == "sparse_affine":
+            transform = SparseConditionalAffineScalarTransform(
+                param_net=param_net,
+                features=1,
+                conditional_std=not homoskedastic,
+                min_scale=min_std,
+            )
+        transforms.append(transform)
+
+    structure_trf = NormalizingFlow(transforms)
 
     return structure_trf
 
@@ -580,24 +618,41 @@ def make_lipschitz_monotonic_mlp_structure_transform(
     n_groups=2,
     kind="one-inf",
     lipschitz_const=1.0,
+    transform_type="affine",
+    n_transforms=1,
 ):
     """
     Utility function that constructs an invertible transformation for causal mechanisms
     in SCMs
     """
-    input_factor = 2 if concat_masks_to_parents else 1
-    features = (
-        [input_factor * dim_z]
-        + [hidden_units for _ in range(hidden_layers)]
-        + [1 if homoskedastic else 2]
-    )
-    param_net = make_lipschitz_monotonic_mlp(
-        features,
-        monotonic_constraints=monotonic_constraints,
-        n_groups=n_groups,
-        kind=kind,
-        lipschitz_const=lipschitz_const,
-    )
+
+    if transform_type in ["affine", "sparse_affine"]:
+        context_size = None
+        input_factor = 2 if concat_masks_to_parents else 1
+        features = (
+            [input_factor * dim_z]
+            + [hidden_units for _ in range(hidden_layers)]
+            + [1 if homoskedastic else 2]
+        )
+    else:
+        context_factor = 2 if concat_masks_to_parents else 1
+        context_size = context_factor * dim_z
+        features = [1 + context_size] + [hidden_units for _ in range(hidden_layers)] + [1]
+
+    monotonic_constraint_mask = None
+    if monotonic_constraints is not None and monotonic_constraints != "none":
+        if monotonic_constraints == "all":
+            # None applies monotonic constraints to all inputs
+            monotonic_constraint_mask = None
+        elif monotonic_constraints == "non_mask":
+            monotonic_constraint_mask = torch.ones(1 + dim_z)
+            if concat_masks_to_parents:
+                monotonic_constraint_mask = torch.cat(
+                    [monotonic_constraint_mask, torch.zeros(dim_z)]
+                )
+        else:
+            assert isinstance(monotonic_constraints, list)
+            monotonic_constraint_mask = monotonic_constraints
 
     # if monotonic_constraints is not None and monotonic_constraints != "none":
     #     # Unwrap monotonic wrapper
@@ -605,9 +660,37 @@ def make_lipschitz_monotonic_mlp_structure_transform(
     # else:
     #     last_layer = list(param_net._modules.values())[-1]
 
-    structure_trf = ConditionalAffineScalarTransform(
-        param_net=param_net, features=1, conditional_std=not homoskedastic, min_scale=min_std
-    )
+    transforms = []
+    for _ in range(n_transforms):
+        param_net = make_lipschitz_monotonic_mlp(
+            features,
+            monotonic_constraints=monotonic_constraint_mask,
+            n_groups=n_groups,
+            kind=kind,
+            lipschitz_const=lipschitz_const,
+        )
+
+        if transform_type == "affine":
+            transform = ConditionalLinearTransform(
+                # transform = ConditionalAffineScalarTransform(
+                param_net=param_net,
+                features=1,
+                conditional_std=not homoskedastic,
+                min_scale=min_std,
+            )
+        elif transform_type == "sparse_affine":
+            assert homoskedastic
+            # transform = SparseConditionalAffineScalarTransform(
+            transform = SparseConditionalLinearTransform(
+                param_net=param_net, features=1, conditional_std=False, min_scale=min_std
+            )
+        elif transform_type == "residual":
+            # Needed for invertibility
+            assert lipschitz_const < 1.0
+            transform = ConditionalResidualTransform(net=param_net)
+        transforms.append(transform)
+
+    structure_trf = NormalizingFlow(transforms)
 
     return structure_trf
 
@@ -618,6 +701,7 @@ def make_linear_structure_transform(
     min_std,
     concat_masks_to_parents=True,
     initialization="default",
+    n_transforms=1
 ):
     """
     Utility function that constructs an invertible transformation for causal mechanisms
@@ -625,53 +709,58 @@ def make_linear_structure_transform(
     """
     input_factor = 2 if concat_masks_to_parents else 1
     features = [input_factor * dim_z] + [1 if homoskedastic else 2]
-    param_net = nn.Linear(features[0], features[1])
 
-    if initialization == "default":
-        # param_net outputs mean and log std parameters of a Gaussian (log std only if
-        # homoskedastic = False), as a function of the causal parents.
-        # We usually want to initialize param_net such that:
-        #  - log std is very close to zero
-        #  - mean is reasonably close to zero, but may already have some nontrivial dependence on
-        #    the parents
-        mean_bias_std = 1.0e-3
-        mean_weight_std = 0.1
-        log_std_bias_std = 1.0e-6
-        log_std_weight_std = 1.0e-3
-        log_std_bias_mean = 0.0
-    elif initialization == "strong_effects":
-        # However, when creating a GT model as an initialized neural SCM, we want slightly more
-        # interesting initializations, with pronounced causal effects. That's what the
-        # enhance_causal_effects keyword is for. When that's True, we would like the Gaussian mean
-        # to depend quite strongly on the parents, and also would appreciate some non-trivial
-        # heteroskedasticity (log std depending on the parents).
-        mean_bias_std = 0.2
-        mean_weight_std = 1.5
-        log_std_bias_std = 1.0e-6
-        log_std_weight_std = 0.1
-        log_std_bias_mean = 0.0
-    elif initialization == "broad":
-        # For noise-centric models we want that the typical initial standard deviation in p(e2 | e1)
-        # is large, around 10
-        mean_bias_std = 1.0e-3
-        mean_weight_std = 0.1
-        log_std_bias_std = 1.0e-6
-        log_std_weight_std = 1.0e-3
-        log_std_bias_mean = 2.3
-    else:
-        raise ValueError(f"Unknown initialization scheme {initialization}")
+    transforms = []
+    for _ in range(n_transforms):
+        param_net = nn.Linear(features[0], features[1])
 
-    if homoskedastic:
-        nn.init.normal_(param_net.bias, mean=0.0, std=mean_bias_std)
-        nn.init.normal_(param_net.weight, mean=0.0, std=mean_weight_std)
-    else:
-        nn.init.normal_(param_net.bias[0], mean=log_std_bias_mean, std=log_std_bias_std)
-        nn.init.normal_(param_net.weight[0, :], mean=0.0, std=log_std_weight_std)
-        nn.init.normal_(param_net.bias[1], mean=0.0, std=mean_bias_std)
-        nn.init.normal_(param_net.weight[1, :], mean=0.0, std=mean_weight_std)
+        if initialization == "default":
+            # param_net outputs mean and log std parameters of a Gaussian (log std only if
+            # homoskedastic = False), as a function of the causal parents.
+            # We usually want to initialize param_net such that:
+            #  - log std is very close to zero
+            #  - mean is reasonably close to zero, but may already have some nontrivial dependence on
+            #    the parents
+            mean_bias_std = 1.0e-3
+            mean_weight_std = 0.1
+            log_std_bias_std = 1.0e-6
+            log_std_weight_std = 1.0e-3
+            log_std_bias_mean = 0.0
+        elif initialization == "strong_effects":
+            # However, when creating a GT model as an initialized neural SCM, we want slightly more
+            # interesting initializations, with pronounced causal effects. That's what the
+            # enhance_causal_effects keyword is for. When that's True, we would like the Gaussian mean
+            # to depend quite strongly on the parents, and also would appreciate some non-trivial
+            # heteroskedasticity (log std depending on the parents).
+            mean_bias_std = 0.2
+            mean_weight_std = 1.5
+            log_std_bias_std = 1.0e-6
+            log_std_weight_std = 0.1
+            log_std_bias_mean = 0.0
+        elif initialization == "broad":
+            # For noise-centric models we want that the typical initial standard deviation in p(e2 | e1)
+            # is large, around 10
+            mean_bias_std = 1.0e-3
+            mean_weight_std = 0.1
+            log_std_bias_std = 1.0e-6
+            log_std_weight_std = 1.0e-3
+            log_std_bias_mean = 2.3
+        else:
+            raise ValueError(f"Unknown initialization scheme {initialization}")
 
-    structure_trf = ConditionalLinearTransform(
-        param_net=param_net, features=1, conditional_std=not homoskedastic, min_scale=min_std
-    )
+        if homoskedastic:
+            nn.init.normal_(param_net.bias, mean=0.0, std=mean_bias_std)
+            nn.init.normal_(param_net.weight, mean=0.0, std=mean_weight_std)
+        else:
+            nn.init.normal_(param_net.bias[0], mean=log_std_bias_mean, std=log_std_bias_std)
+            nn.init.normal_(param_net.weight[0, :], mean=0.0, std=log_std_weight_std)
+            nn.init.normal_(param_net.bias[1], mean=0.0, std=mean_bias_std)
+            nn.init.normal_(param_net.weight[1, :], mean=0.0, std=mean_weight_std)
 
+        transform = ConditionalLinearTransform(
+            param_net=param_net, features=1, conditional_std=not homoskedastic, min_scale=min_std
+        )
+        transforms.append(transform)
+
+    structure_trf = NormalizingFlow(transforms)
     return structure_trf
