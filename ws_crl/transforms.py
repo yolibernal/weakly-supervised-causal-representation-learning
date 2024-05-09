@@ -150,6 +150,205 @@ class ConditionalAffineScalarTransform(nflows.transforms.Transform):
         return outputs, -logabsdet
 
 
+class SparseConditionalAffineScalarTransform(nflows.transforms.Transform):
+    """
+    Computes X = X * scale(context) + shift(context), where (scale, shift) are given by
+    param_net(context). param_net takes as input the context with shape (batchsize,
+    context_features) or None, its output has to have shape (batchsize, 2).
+    """
+
+    def __init__(
+        self,
+        param_net=None,
+        features=None,
+        conditional_std=True,
+        min_scale=None,
+        gamma=-0.1,
+        zeta=1.1,
+    ):
+        super().__init__()
+
+        self.conditional_std = conditional_std
+        self.param_net = param_net
+
+        self.register_buffer("gamma", torch.tensor(gamma))
+        self.register_buffer("zeta", torch.tensor(zeta))
+
+        self.log_alpha = torch.zeros(features)
+        self.log_alpha = torch.nn.Parameter(self.log_alpha)
+
+        self.beta = torch.zeros(features)
+        torch.nn.init.ones_(self.beta)
+        self.beta = torch.nn.Parameter(self.beta)
+
+        if self.param_net is None:
+            assert features is not None
+            self.shift = torch.zeros(features)
+            torch.nn.init.normal_(self.shift)
+            self.shift = torch.nn.Parameter(self.shift)
+        else:
+            self.shift = None
+
+        if self.param_net is None or not conditional_std:
+            self.log_scale = torch.zeros(features)
+            torch.nn.init.normal_(self.log_scale)
+            self.log_scale = torch.nn.Parameter(self.log_scale)
+        else:
+            self.log_scale = None
+
+        if min_scale is None:
+            self.min_scale = None
+        else:
+            self.register_buffer("min_scale", torch.tensor(min_scale))
+
+    def get_scale_and_shift(self, context):
+        u = torch.rand_like(self.log_alpha)
+
+        if self.training:
+            s = torch.sigmoid((torch.log(u) - torch.log(1 - u) + self.log_alpha) / self.beta)
+        else:
+            s = torch.sigmoid(self.log_alpha)
+        s_ = s * (self.zeta - self.gamma) + self.gamma
+        z = torch.clip(s_, min=0, max=1)
+
+        masked_context = context * z
+
+        if self.param_net is None:
+            shift = self.shift.unsqueeze(1)
+            log_scale = self.log_scale.unsqueeze(1)
+        elif not self.conditional_std:
+            shift = self.param_net(masked_context)
+            log_scale = self.log_scale.unsqueeze(1)
+        else:
+            log_scale_and_shift = self.param_net(masked_context)
+            log_scale = log_scale_and_shift[:, 0].unsqueeze(1)
+            shift = log_scale_and_shift[:, 1].unsqueeze(1)
+
+        scale = torch.exp(log_scale)
+        if self.min_scale is not None:
+            scale = scale + self.min_scale
+
+        num_dims = torch.prod(torch.tensor([1]), dtype=torch.float)
+        logabsdet = torch.log(scale) * num_dims
+
+        return scale, shift, logabsdet
+
+    def forward(self, inputs, context=None):
+        scale, shift, logabsdet = self.get_scale_and_shift(context)
+        outputs = inputs * scale + shift
+        return outputs, logabsdet
+
+    def inverse(self, inputs, context=None):
+        scale, shift, logabsdet = self.get_scale_and_shift(context)
+        outputs = (inputs - shift) / scale
+        return outputs, -logabsdet
+
+    def compute_regularization_term(self):
+        complexity_loss = torch.sigmoid(
+            self.log_alpha - self.beta * torch.log(-self.gamma / self.zeta)
+        )
+        return complexity_loss
+
+
+class SparseConditionalLinearTransform(nflows.transforms.Transform):
+    """
+    Computes X = X * scale(context) + shift(context), where (scale, shift) are given by
+    param_net(context). param_net takes as input the context with shape (batchsize,
+    context_features) or None, its output has to have shape (batchsize, 2).
+    """
+
+    def __init__(
+        self,
+        param_net=None,
+        features=None,
+        conditional_std=True,
+        min_scale=None,
+        gamma=-0.1,
+        zeta=1.1,
+    ):
+        super().__init__()
+
+        self.conditional_std = conditional_std
+        self.param_net = param_net
+
+        self.register_buffer("gamma", torch.tensor(gamma))
+        self.register_buffer("zeta", torch.tensor(zeta))
+
+        self.log_alpha = torch.zeros(features)
+        self.log_alpha = torch.nn.Parameter(self.log_alpha)
+
+        self.beta = torch.zeros(features)
+        torch.nn.init.ones_(self.beta)
+        self.beta = torch.nn.Parameter(self.beta)
+
+        if self.param_net is None:
+            assert features is not None
+            self.shift = torch.zeros(features)
+            torch.nn.init.normal_(self.shift)
+            self.shift = torch.nn.Parameter(self.shift)
+        else:
+            self.shift = None
+
+        if self.param_net is None or not conditional_std:
+            self.log_scale = torch.zeros(features)
+            torch.nn.init.normal_(self.log_scale)
+            self.log_scale = torch.nn.Parameter(self.log_scale)
+        else:
+            self.log_scale = None
+
+        if min_scale is None:
+            self.min_scale = None
+        else:
+            self.register_buffer("min_scale", torch.tensor(min_scale))
+
+    def get_scale_and_shift(self, context):
+        u = torch.rand_like(self.log_alpha)
+
+        if self.training:
+            s = torch.sigmoid((torch.log(u) - torch.log(1 - u) + self.log_alpha) / self.beta)
+        else:
+            s = torch.sigmoid(self.log_alpha)
+        s_ = s * (self.zeta - self.gamma) + self.gamma
+        z = torch.clip(s_, min=0, max=1)
+
+        masked_context = context * z
+
+        if self.param_net is None:
+            shift = self.shift.unsqueeze(1)
+            scale = self.scale.unsqueeze(1)
+        elif not self.conditional_std:
+            shift = self.param_net(masked_context)
+            scale = self.scale.unsqueeze(1)
+        else:
+            scale_and_shift = self.param_net(masked_context)
+            scale = scale_and_shift[:, 0].unsqueeze(1)
+            shift = scale_and_shift[:, 1].unsqueeze(1)
+
+        if self.min_scale is not None:
+            scale = scale + self.min_scale
+
+        num_dims = torch.prod(torch.tensor([1]), dtype=torch.float)
+        logabsdet = torch.log(scale) * num_dims
+
+        return scale, shift, logabsdet
+
+    def forward(self, inputs, context=None):
+        scale, shift, logabsdet = self.get_scale_and_shift(context)
+        outputs = (inputs - shift) / scale
+        return outputs, -logabsdet
+
+    def inverse(self, inputs, context=None):
+        scale, shift, logabsdet = self.get_scale_and_shift(context)
+        outputs = inputs * scale + shift
+        return outputs, logabsdet
+
+    def compute_regularization_term(self):
+        complexity_loss = torch.sigmoid(
+            self.log_alpha - self.beta * torch.log(-self.gamma / self.zeta)
+        )
+        return complexity_loss
+
+
 class ConditionalLinearTransform(nflows.transforms.Transform):
     def __init__(self, param_net=None, features=None, conditional_std=True, min_scale=None):
         super().__init__()
