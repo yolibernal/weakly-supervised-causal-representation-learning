@@ -607,6 +607,7 @@ def plot_solution_function_responses(
     MAP_interventions,
     device,
     n=50,
+    n_samples=10,
     domain=(-3, 3),
     sort_by_MAP_interventions=True,
     filename=None,
@@ -631,31 +632,42 @@ def plot_solution_function_responses(
             [list(MAP_components).index(i) for i in range(len(MAP_components))]
         )
 
-    e_mean = torch.zeros(cfg.model.dim_z)
-    for batch in loader:
-        *_, e1, e2 = batch
-        if len(e2.shape) > 2:
-            e2 = e2[:, -1]
-        e_mean += e1.squeeze().mean(dim=0)
-        e_mean += e2.squeeze().mean(dim=0)
-    e_mean /= len(loader) * 2
-
     x_min, x_max = domain
-    values = torch.linspace(x_min, x_max, n).to(device)
-    solution_function_responses = torch.zeros(cfg.model.dim_z, n, cfg.model.dim_z)
 
-    for i in range(cfg.model.dim_z):
-        e = e_mean.repeat(n, 1).to(device)
-        e[:, i] = values
-        solution_function_responses[MAP_components_inverse[i]] = model.scm.noise_to_causal(e)[
-            :, MAP_components
-        ]
+    x1s = []
+    samples_collected = 0
+    for i, (x1, *_), in enumerate(loader):
+        x1 = x1.to(device)
+        x1s.append(x1)
+        samples_collected += x1.size(0)
+        if samples_collected >= n_samples:
+            break
+    x1s = torch.cat(x1s, dim=0)
+    x1s = x1s[:n_samples]
 
-    for i in range(cfg.model.dim_z):
-        for j in range(cfg.model.dim_z):
-            ax = axes[i, j]
-            ax.plot(values.cpu(), solution_function_responses[i, :, j].cpu())
-            ax.set_title(f"$s_{j+1}(e)$, varying $e_{i+1}$")
+
+    x1, *_ = get_first_batch(loader)
+    x1 = x1.to(device)
+    e1s = model.encode_to_noise(x1)
+
+    e1s = e1s[:n_samples]
+
+    for e1 in e1s:
+        values = torch.linspace(x_min, x_max, n).to(device)
+        solution_function_responses = torch.zeros(cfg.model.dim_z, n, cfg.model.dim_z)
+
+        for i in range(cfg.model.dim_z):
+            e = e1.repeat(n, 1).to(device)
+            e[:, i] = values
+            solution_function_responses[MAP_components_inverse[i]] = model.scm.noise_to_causal(e)[
+                :, MAP_components
+            ]
+
+        for i in range(cfg.model.dim_z):
+            for j in range(cfg.model.dim_z):
+                ax = axes[i, j]
+                ax.plot(values.cpu(), solution_function_responses[i, :, j].cpu(), alpha=0.5)
+                ax.set_title(f"$s_{j+1}(e)$, varying $e_{i+1}$")
 
     # title
     fig.suptitle(
