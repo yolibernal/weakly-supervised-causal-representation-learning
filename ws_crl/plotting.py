@@ -462,6 +462,22 @@ def plot_x(cfg, x, ax=None):
 
         # add margins
         ax.margins(0.1, 0.1)
+    elif cfg.data.type == "y_pos":
+        # data is concatenated xy pairs, i.e. [x1, y1, x2, y2, ...]
+        x = x.cpu().numpy()
+
+        color_pool = list(mcolors.BASE_COLORS.keys())
+
+        if len(x) < len(color_pool):
+            colors = color_pool[: len(x)]
+        else:
+            colors = None
+
+        offsets = np.arange(0, len(x))
+        ax.scatter(offsets, x, c=colors)
+
+        # add margins
+        ax.margins(0.1, 0.1)
     elif cfg.data.type == "image":
         ax.imshow(x.clamp(0, 1).mul(255).cpu().permute([1, 2, 0]).to(torch.uint8))
         ax.axis("off")

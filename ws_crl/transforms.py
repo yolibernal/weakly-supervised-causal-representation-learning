@@ -335,12 +335,12 @@ class SparseConditionalLinearTransform(nflows.transforms.Transform):
     def forward(self, inputs, context=None):
         scale, shift, logabsdet = self.get_scale_and_shift(context)
         outputs = (inputs - shift) / scale
-        return outputs, -logabsdet
+        return outputs, 1 / logabsdet
 
     def inverse(self, inputs, context=None):
         scale, shift, logabsdet = self.get_scale_and_shift(context)
         outputs = inputs * scale + shift
-        return outputs, logabsdet
+        return outputs, -1 / logabsdet
 
     def compute_regularization_term(self):
         complexity_loss = torch.sigmoid(
@@ -399,12 +399,12 @@ class ConditionalLinearTransform(nflows.transforms.Transform):
     def forward(self, inputs, context=None):
         scale, shift, logabsdet = self.get_scale_and_shift(context)
         outputs = (inputs - shift) / scale
-        return outputs, -logabsdet
+        return outputs, 1 / logabsdet
 
     def inverse(self, inputs, context=None):
         scale, shift, logabsdet = self.get_scale_and_shift(context)
         outputs = inputs * scale + shift
-        return outputs, logabsdet
+        return outputs, -1 / logabsdet
 
 
 def batch_jacobian(g, x):
