@@ -10,7 +10,12 @@ import torch
 from torch import nn
 
 from ws_crl.causal.graph import ENCOLearnedGraph, DDSLearnedGraph, FixedOrderLearnedGraph
-from ws_crl.transforms import make_mlp_structure_transform, MaskedSolutionTransform
+from ws_crl.transforms import (
+    make_linear_structure_transform,
+    make_lipschitz_monotonic_mlp_structure_transform,
+    make_mlp_structure_transform,
+    MaskedSolutionTransform,
+)
 from ws_crl.utils import mask, clean_and_clamp
 
 DEFAULT_BASE_DENSITY = nflows.distributions.StandardNormal((1,))
@@ -30,7 +35,14 @@ class ImplicitSCM(nn.Module):
     """
 
     def __init__(
-        self, graph, solution_functions, base_density, manifold_thickness, dim_z, causal_structure
+        self,
+        graph,
+        solution_functions,
+        base_density,
+        manifold_thickness,
+        dim_z,
+        causal_structure,
+        concat_masks_to_parents=True,
     ):
         super().__init__()
         self.dim_z = dim_z
@@ -42,6 +54,7 @@ class ImplicitSCM(nn.Module):
         self.register_buffer("topological_order", torch.zeros(dim_z, dtype=torch.long))
 
         self.set_causal_structure(graph, causal_structure)
+        self.concat_masks_to_parents = concat_masks_to_parents
 
     def sample(self, n, intervention=None, graph_mode="hard", graph_temperature=1.0):
         """Samples a single latent vector, either observed or under an intervention"""
@@ -286,7 +299,9 @@ class ImplicitSCM(nn.Module):
         )
         dummy_data = self._mask_values.unsqueeze(0)
         dummy_data[:, i] = 0.0
-        masked_epsilon = mask(epsilon, mask_, mask_data=dummy_data)
+        masked_epsilon = mask(
+            epsilon, mask_, mask_data=dummy_data, concat_mask=self.concat_masks_to_parents
+        )
         return masked_epsilon
 
     def _get_ancestor_mask(self, i, adjacency_matrix, device, n=1):
@@ -373,6 +388,9 @@ class MLPImplicitSCM(ImplicitSCM):
         base_density=DEFAULT_BASE_DENSITY,
         homoskedastic=True,
         min_std=None,
+        transform_type="affine",
+        n_transforms=1,
+        concat_masks_to_parents=True,
     ):
         solution_functions = []
 
@@ -413,6 +431,9 @@ class MLPImplicitSCM(ImplicitSCM):
                     homoskedastic,
                     min_std=min_std,
                     initialization="broad",
+                    transform_type=transform_type,
+                    n_transforms=n_transforms,
+                    concat_masks_to_parents=concat_masks_to_parents,
                 )
             )
 
@@ -423,4 +444,147 @@ class MLPImplicitSCM(ImplicitSCM):
             manifold_thickness,
             dim_z=dim_z,
             causal_structure=causal_structure,
+            concat_masks_to_parents=concat_masks_to_parents,
+        )
+
+
+class LipschitzMonotonicSCM(ImplicitSCM):
+    def __init__(
+        self,
+        graph_parameterization,
+        manifold_thickness,
+        dim_z,
+        hidden_layers=1,
+        hidden_units=100,
+        base_density=DEFAULT_BASE_DENSITY,
+        homoskedastic=True,
+        min_std=None,
+        monotonic_constraints=None,
+        n_groups=2,
+        kind="one-inf",
+        lipschitz_const=1.0,
+        transform_type="affine",
+        n_transforms=1,
+        concat_masks_to_parents=True,
+    ):
+        solution_functions = []
+
+        # Initialize graph
+        causal_structure = None
+        assert graph_parameterization in {
+            "enco",
+            "dds",
+            "fixed_order",
+            None,
+            "none",
+            "none_fixed_order",
+            "none_trivial",
+        }
+        if graph_parameterization == "enco":
+            graph = ENCOLearnedGraph(dim_z)
+        elif graph_parameterization == "dds":
+            graph = DDSLearnedGraph(dim_z)
+        elif graph_parameterization == "fixed_order":
+            graph = FixedOrderLearnedGraph(dim_z)
+        elif graph_parameterization == "none_fixed_order":
+            graph = None
+            causal_structure = "fixed_order"
+        elif graph_parameterization == "none_trivial":
+            graph = None
+            causal_structure = "trivial"
+        else:
+            graph = None
+            causal_structure = "none"
+
+        # Initialize transforms for p(e'|e)
+        for _ in range(dim_z):
+            solution_functions.append(
+                make_lipschitz_monotonic_mlp_structure_transform(
+                    dim_z,
+                    hidden_layers,
+                    hidden_units,
+                    homoskedastic,
+                    min_std=min_std,
+                    initialization="broad",
+                    monotonic_constraints=monotonic_constraints,
+                    n_groups=n_groups,
+                    kind=kind,
+                    lipschitz_const=lipschitz_const,
+                    transform_type=transform_type,
+                    n_transforms=n_transforms,
+                    concat_masks_to_parents=concat_masks_to_parents,
+                )
+            )
+
+        super().__init__(
+            graph,
+            solution_functions,
+            base_density,
+            manifold_thickness,
+            dim_z=dim_z,
+            causal_structure=causal_structure,
+            concat_masks_to_parents=concat_masks_to_parents,
+        )
+
+
+class LinearImplicitSCM(ImplicitSCM):
+    def __init__(
+        self,
+        graph_parameterization,
+        manifold_thickness,
+        dim_z,
+        base_density=DEFAULT_BASE_DENSITY,
+        homoskedastic=True,
+        min_std=None,
+        concat_masks_to_parents=True,
+    ):
+        solution_functions = []
+
+        # Initialize graph
+        causal_structure = None
+        assert graph_parameterization in {
+            "enco",
+            "dds",
+            "fixed_order",
+            None,
+            "none",
+            "none_fixed_order",
+            "none_trivial",
+        }
+        if graph_parameterization == "enco":
+            graph = ENCOLearnedGraph(dim_z)
+        elif graph_parameterization == "dds":
+            graph = DDSLearnedGraph(dim_z)
+        elif graph_parameterization == "fixed_order":
+            graph = FixedOrderLearnedGraph(dim_z)
+        elif graph_parameterization == "none_fixed_order":
+            graph = None
+            causal_structure = "fixed_order"
+        elif graph_parameterization == "none_trivial":
+            graph = None
+            causal_structure = "trivial"
+        else:
+            graph = None
+            causal_structure = "none"
+
+        # Initialize transforms for p(e'|e)
+        for _ in range(dim_z):
+            solution_functions.append(
+                make_linear_structure_transform(
+                    dim_z,
+                    homoskedastic,
+                    min_std=min_std,
+                    initialization="broad",
+                    concat_masks_to_parents=concat_masks_to_parents,
+                )
+            )
+
+        super().__init__(
+            graph,
+            solution_functions,
+            base_density,
+            manifold_thickness,
+            dim_z=dim_z,
+            causal_structure=causal_structure,
+            concat_masks_to_parents=concat_masks_to_parents,
         )

@@ -7,6 +7,7 @@ General-purpose neural networks
 
 import torch
 from torch import nn
+import monotonicnetworks as lmn
 
 
 class Quadratic(nn.Module):
@@ -24,6 +25,19 @@ class Quadratic(nn.Module):
             outputs = outputs + self.bias
 
         return outputs
+
+
+class ConditionalWrapper(nn.Module):
+    """Wrapper that adds a context to the input of a neural network"""
+
+    def __init__(self, net):
+        super().__init__()
+        self.net = net
+
+    def forward(self, inputs, context=None):
+        if context is not None:
+            inputs = torch.cat([inputs, context], dim=1)
+        return self.net(inputs)
 
 
 def get_activation(key):
@@ -61,6 +75,42 @@ def make_mlp(features, activation="relu", final_activation=None, initial_activat
     else:
         net = nn.Identity()
 
+    net = ConditionalWrapper(net)
+
+    return net
+
+
+def make_lipschitz_monotonic_mlp(
+    features,
+    monotonic_constraints=None,
+    kind="one-inf",
+    lipschitz_const=1.0,
+    n_groups=2,
+):
+    if len(features) >= 2:
+        layers = []
+        for in_, out in zip(features[:-2], features[1:-1]):
+            layers.append(
+                lmn.LipschitzLinear(in_, out, kind=kind, lipschitz_const=lipschitz_const),
+            )
+            layers.append(
+                lmn.GroupSort(n_groups=n_groups),
+            )
+        layers.append(
+            lmn.LipschitzLinear(
+                features[-2], features[-1], kind=kind, lipschitz_const=lipschitz_const
+            )
+        )
+
+        net = nn.Sequential(*layers)
+        if monotonic_constraints is not None:
+            net = lmn.MonotonicWrapper(
+                net, monotonic_constraints=monotonic_constraints, lipschitz_const=lipschitz_const
+            )
+    else:
+        net = nn.Identity()
+
+    net = ConditionalWrapper(net)
     return net
 
 

@@ -1,0 +1,10 @@
+defaults:
+  - general: local
+  # - data: sequence_2dcubes_son_causal_variables
+  - data: sequence_length_1_2dcubes_causal_variables
+  - model: sequence_ilcm_linear_scm
+  - training: sequence_ilcm
+  - eval: default
+  - plotting: default
+  - hydra
+  - _self_  # Ensures that entries in this file overwrite everything references above, even in hydra <= 1.0

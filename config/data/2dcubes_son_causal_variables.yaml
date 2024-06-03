@@ -1,0 +1,19 @@
+dataset: 2dcubes
+type: xy_pairs
+
+dim_x: 6
+dim_z: 6
+
+encoder:
+  type: son
+  path: '${data.data_dir}/encoder.pt'
+
+noise: 0
+
+normalize: true
+x1_mean: null
+x2_mean: null
+x1_std: null
+x2_std: null
+
+data_dir: ???

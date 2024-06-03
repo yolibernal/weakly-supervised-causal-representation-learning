@@ -49,6 +49,9 @@ class VAEMetrics(nn.Module):
         edge_regularization_amount=0.0,
         cyclicity_regularization_amount=0.0,
         intervention_entropy_regularization_amount=0.0,
+        intervened_sequence_regularization_amount=None,
+        unintervened_sequence_regularization_amount=None,
+        solution_function_regularization_amount=None,
         **model_outputs,
     ):
         metrics = {}
@@ -71,6 +74,9 @@ class VAEMetrics(nn.Module):
             z_regularization_amount,
             edge_regularization_amount,
             cyclicity_regularization_amount,
+            intervened_sequence_regularization_amount,
+            unintervened_sequence_regularization_amount,
+            solution_function_regularization_amount
         )
 
         assert torch.isfinite(loss)
@@ -112,6 +118,9 @@ class VAEMetrics(nn.Module):
         z_regularization_amount,
         edge_regularization_amount,
         cyclicity_regularization_amount,
+        intervened_sequence_regularization_amount,
+        unintervened_sequence_regularization_amount,
+        solution_function_regularization_amount
     ):
         if edge_regularization_amount is not None and "edges" in model_outputs:
             loss += edge_regularization_amount * torch.mean(model_outputs["edges"])
@@ -135,14 +144,32 @@ class VAEMetrics(nn.Module):
             loss += inverse_consistency_regularization_amount * torch.mean(
                 model_outputs["inverse_consistency_mse"]
             )
+        if (
+            intervened_sequence_regularization_amount is not None
+            and "intervened_sequence_loss" in model_outputs
+        ):
+            mean_intervened_sequence_loss = torch.mean(model_outputs["intervened_sequence_loss"])
+            metrics["intervened_sequence_loss"] = mean_intervened_sequence_loss.item()
+            loss += intervened_sequence_regularization_amount * mean_intervened_sequence_loss
+        if (
+            unintervened_sequence_regularization_amount is not None
+            and "unintervened_sequence_loss" in model_outputs
+        ):
+            mean_unintervened_sequence_loss = torch.mean(
+                model_outputs["unintervened_sequence_loss"]
+            )
+            metrics["unintervened_sequence_loss"] = mean_unintervened_sequence_loss.item()
+            loss += unintervened_sequence_regularization_amount * mean_unintervened_sequence_loss
 
         if (
-            inverse_consistency_regularization_amount is not None
-            and "inverse_consistency_mse" in model_outputs
+            solution_function_regularization_amount is not None
+            and "solution_function_regularization" in model_outputs
         ):
-            loss += inverse_consistency_regularization_amount * torch.mean(
-                model_outputs["inverse_consistency_mse"]
+            mean_solution_function_regularization = torch.mean(
+                model_outputs["solution_function_regularization"]
             )
+            metrics["solution_function_regularization"] = mean_solution_function_regularization.item()
+            loss += solution_function_regularization_amount * mean_solution_function_regularization
 
         if (
             intervention_entropy_regularization_amount is not None

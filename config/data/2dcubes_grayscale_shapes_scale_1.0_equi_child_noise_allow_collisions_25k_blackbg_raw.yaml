@@ -1,0 +1,15 @@
+dataset: 2dcubes_grayscale_shapes_scale_1.0_equi_child_noise_allow_collisions_25k_blackbg
+type: compressed
+
+# dim_x: [128, 128, 3]
+dim_x: [64, 64, 3]
+dim_z: 6
+noise: 0
+
+x_mean: null
+x_std: null
+
+x_min: null
+x_max: null
+
+data_dir: '${general.base_dir}/data/${data.dataset}'

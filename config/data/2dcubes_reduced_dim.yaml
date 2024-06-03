@@ -1,0 +1,20 @@
+dataset: 2dcubes
+type: image
+
+dim_x: 16
+dim_z: 6
+
+encoder:
+  type: sbd
+  exp_dir: /mnt/raid/ni/jonasb/wscrl/debug_2dcubes_reduce_dim
+  model_name: model.pt
+
+noise: 0
+
+normalize: true
+x1_mean: null
+x2_mean: null
+x1_std: null
+x2_std: null
+
+data_dir: ???
