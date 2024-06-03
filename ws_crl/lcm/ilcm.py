@@ -6,6 +6,7 @@ import torch
 
 from ws_crl.encoder import gaussian_encode
 from ws_crl.lcm.base import BaseLCM
+from torch.distributions.categorical import Categorical
 
 
 def sum_observational_and_counterfactual(x1, x2_batch, feature_dims=None):
@@ -71,6 +72,7 @@ class ILCM(BaseLCM):
         model_interventions=True,
         deterministic_intervention_encoder=False,
         intervention_encoder_offset=1.0e-4,
+        sample_from_intervention_posterior=False,
         **kwargs,
     ):
         """
@@ -140,7 +142,10 @@ class ILCM(BaseLCM):
             intervention,
             weight,
         ) in self._iterate_interventions(
-            intervention_posterior, deterministic_intervention_encoder, batchsize
+            intervention_posterior,
+            deterministic_intervention_encoder,
+            batchsize,
+            sample_from_intervention_posterior=sample_from_intervention_posterior,
         ):
             # Sample from e1, e2 given intervention (including the projection to the counterfactual
             # manifold)
@@ -434,7 +439,11 @@ class ILCM(BaseLCM):
         return most_likely_intervention_idx, None, x2_reco
 
     def _iterate_interventions(
-        self, intervention_posterior, deterministic_intervention_encoder, batchsize
+        self,
+        intervention_posterior,
+        deterministic_intervention_encoder,
+        batchsize,
+        sample_from_intervention_posterior=False,
     ):
         if deterministic_intervention_encoder:
             most_likely_intervention = torch.argmax(intervention_posterior, dim=1)  # (batchsize,)
@@ -445,10 +454,24 @@ class ILCM(BaseLCM):
             weight = torch.ones((batchsize, 1), device=intervention_posterior.device)
             yield intervention, weight
         else:
-            for intervention, weight in zip(self._interventions, intervention_posterior.T):
-                intervention = intervention.unsqueeze(0).expand((batchsize, intervention.shape[0]))
-                weight = weight.unsqueeze(1)  # (batchsize, 1)
-                yield intervention, weight
+            if not sample_from_intervention_posterior:
+                for intervention, weight in zip(self._interventions, intervention_posterior.T):
+                    intervention = intervention.unsqueeze(0).expand(
+                        (batchsize, intervention.shape[0])
+                    )
+                    weight = weight.unsqueeze(1)  # (batchsize, 1)
+                    yield intervention, weight
+            else:
+                # sample from intervention posterior
+                intervention_samples = []
+                for i in range(batchsize):
+                    intervention_sample = Categorical(intervention_posterior[i]).sample()
+                    intervention_sample = self._interventions[intervention_sample]
+                    intervention_samples.append(intervention_sample)
+                intervention_samples = torch.stack(intervention_samples, dim=0)
+                yield intervention_samples, torch.ones(
+                    (batchsize, 1), device=intervention_posterior.device
+                )
 
     def _project_and_sample(
         self, e1_mean, e1_std, e2_mean, e2_std, intervention, deterministic=False
