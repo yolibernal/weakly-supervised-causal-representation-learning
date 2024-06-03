@@ -174,6 +174,7 @@ class SparseConditionalAffineScalarTransform(nflows.transforms.Transform):
         self.register_buffer("gamma", torch.tensor(gamma))
         self.register_buffer("zeta", torch.tensor(zeta))
 
+        # TODO: intialization
         self.log_alpha = torch.zeros(features)
         self.log_alpha = torch.nn.Parameter(self.log_alpha)
 
@@ -249,6 +250,62 @@ class SparseConditionalAffineScalarTransform(nflows.transforms.Transform):
         )
         return complexity_loss
 
+class ConditionalLinearTransform(nflows.transforms.Transform):
+    def __init__(self, param_net=None, features=None, conditional_std=True, min_scale=None):
+        super().__init__()
+
+        self.conditional_std = conditional_std
+        self.param_net = param_net
+
+        if self.param_net is None:
+            assert features is not None
+            self.shift = torch.zeros(features)
+            torch.nn.init.normal_(self.shift)
+            self.shift = torch.nn.Parameter(self.shift)
+        else:
+            self.shift = None
+
+        if self.param_net is None or not conditional_std:
+            self.scale = torch.zeros(features)
+            torch.nn.init.normal_(self.scale)
+            self.scale = torch.nn.Parameter(self.scale)
+        else:
+            self.scale = None
+
+        if min_scale is None:
+            self.min_scale = None
+        else:
+            self.register_buffer("min_scale", torch.tensor(min_scale))
+
+    def get_scale_and_shift(self, context):
+        if self.param_net is None:
+            shift = self.shift.unsqueeze(1)
+            scale = self.scale.unsqueeze(1)
+        elif not self.conditional_std:
+            shift = self.param_net(context)
+            scale = self.scale.unsqueeze(1)
+        else:
+            scale_and_shift = self.param_net(context)
+            scale = scale_and_shift[:, 0].unsqueeze(1)
+            shift = scale_and_shift[:, 1].unsqueeze(1)
+
+        if self.min_scale is not None:
+            scale = scale + self.min_scale
+
+        num_dims = torch.prod(torch.tensor([1]), dtype=torch.float)
+        logabsdet = torch.log(scale) * num_dims
+
+        return scale, shift, logabsdet
+
+    def forward(self, inputs, context=None):
+        scale, shift, logabsdet = self.get_scale_and_shift(context)
+        outputs = (inputs - shift) / scale
+        return outputs, 1 / logabsdet
+
+    def inverse(self, inputs, context=None):
+        scale, shift, logabsdet = self.get_scale_and_shift(context)
+        outputs = inputs * scale + shift
+        return outputs, -1 / logabsdet
 
 class SparseConditionalLinearTransform(nflows.transforms.Transform):
     """
@@ -274,6 +331,7 @@ class SparseConditionalLinearTransform(nflows.transforms.Transform):
         self.register_buffer("gamma", torch.tensor(gamma))
         self.register_buffer("zeta", torch.tensor(zeta))
 
+        # TODO: intialization
         self.log_alpha = torch.zeros(features)
         self.log_alpha = torch.nn.Parameter(self.log_alpha)
 
@@ -335,12 +393,12 @@ class SparseConditionalLinearTransform(nflows.transforms.Transform):
     def forward(self, inputs, context=None):
         scale, shift, logabsdet = self.get_scale_and_shift(context)
         outputs = (inputs - shift) / scale
-        return outputs, -logabsdet
+        return outputs, 1 / logabsdet
 
     def inverse(self, inputs, context=None):
         scale, shift, logabsdet = self.get_scale_and_shift(context)
         outputs = inputs * scale + shift
-        return outputs, logabsdet
+        return outputs, -1 / logabsdet
 
     def compute_regularization_term(self):
         complexity_loss = torch.sigmoid(
@@ -348,63 +406,6 @@ class SparseConditionalLinearTransform(nflows.transforms.Transform):
         )
         return complexity_loss
 
-
-class ConditionalLinearTransform(nflows.transforms.Transform):
-    def __init__(self, param_net=None, features=None, conditional_std=True, min_scale=None):
-        super().__init__()
-
-        self.conditional_std = conditional_std
-        self.param_net = param_net
-
-        if self.param_net is None:
-            assert features is not None
-            self.shift = torch.zeros(features)
-            torch.nn.init.normal_(self.shift)
-            self.shift = torch.nn.Parameter(self.shift)
-        else:
-            self.shift = None
-
-        if self.param_net is None or not conditional_std:
-            self.scale = torch.zeros(features)
-            torch.nn.init.normal_(self.scale)
-            self.scale = torch.nn.Parameter(self.scale)
-        else:
-            self.scale = None
-
-        if min_scale is None:
-            self.min_scale = None
-        else:
-            self.register_buffer("min_scale", torch.tensor(min_scale))
-
-    def get_scale_and_shift(self, context):
-        if self.param_net is None:
-            shift = self.shift.unsqueeze(1)
-            scale = self.scale.unsqueeze(1)
-        elif not self.conditional_std:
-            shift = self.param_net(context)
-            scale = self.scale.unsqueeze(1)
-        else:
-            scale_and_shift = self.param_net(context)
-            scale = scale_and_shift[:, 0].unsqueeze(1)
-            shift = scale_and_shift[:, 1].unsqueeze(1)
-
-        if self.min_scale is not None:
-            scale = scale + self.min_scale
-
-        num_dims = torch.prod(torch.tensor([1]), dtype=torch.float)
-        logabsdet = torch.log(scale) * num_dims
-
-        return scale, shift, logabsdet
-
-    def forward(self, inputs, context=None):
-        scale, shift, logabsdet = self.get_scale_and_shift(context)
-        outputs = (inputs - shift) / scale
-        return outputs, -logabsdet
-
-    def inverse(self, inputs, context=None):
-        scale, shift, logabsdet = self.get_scale_and_shift(context)
-        outputs = inputs * scale + shift
-        return outputs, logabsdet
 
 
 def batch_jacobian(g, x):
@@ -499,6 +500,13 @@ class NormalizingFlow(nn.Module):
             logabsdet += logdet
         return inputs, logabsdet
 
+    def compute_regularization_term(self):
+        regularization_term = 0.0
+        for transform in self.transforms:
+            if hasattr(transform, "compute_regularization_term"):
+                regularization_term += transform.compute_regularization_term().squeeze()
+        return regularization_term
+
 
 def make_intervention_transform(homoskedastic, enhance_causal_effects, min_std=None):
     """
@@ -530,12 +538,19 @@ def make_mlp_structure_transform(
     Utility function that constructs an invertible transformation for causal mechanisms
     in SCMs
     """
-    input_factor = 2 if concat_masks_to_parents else 1
-    features = (
-        [input_factor * dim_z]
-        + [hidden_units for _ in range(hidden_layers)]
-        + [1 if homoskedastic else 2]
-    )
+    if transform_type in ["affine", "sparse_affine"]:
+        input_factor = 2 if concat_masks_to_parents else 1
+        features = (
+            [input_factor * dim_z]
+            + [hidden_units for _ in range(hidden_layers)]
+            + [1 if homoskedastic else 2]
+        )
+    elif transform_type == "residual":
+        context_factor = 2 if concat_masks_to_parents else 1
+        context_size = context_factor * dim_z
+        features = [1 + context_size] + [hidden_units for _ in range(hidden_layers)] + [1]
+    else:
+        raise ValueError(transform_type)
 
     transforms = []
     for _ in range(n_transforms):
@@ -575,15 +590,20 @@ def make_mlp_structure_transform(
         else:
             raise ValueError(f"Unknown initialization scheme {initialization}")
 
-        last_layer = list(param_net._modules.values())[-1]
-        if homoskedastic:
-            nn.init.normal_(last_layer.bias, mean=0.0, std=mean_bias_std)
-            nn.init.normal_(last_layer.weight, mean=0.0, std=mean_weight_std)
-        else:
-            nn.init.normal_(last_layer.bias[0], mean=log_std_bias_mean, std=log_std_bias_std)
-            nn.init.normal_(last_layer.weight[0, :], mean=0.0, std=log_std_weight_std)
-            nn.init.normal_(last_layer.bias[1], mean=0.0, std=mean_bias_std)
-            nn.init.normal_(last_layer.weight[1, :], mean=0.0, std=mean_weight_std)
+        last_layer = list(param_net.net._modules.values())[-1]
+        if transform_type in ["affine", "sparse_affine"]:
+            if homoskedastic:
+                nn.init.normal_(last_layer.bias, mean=0.0, std=mean_bias_std)
+                nn.init.normal_(last_layer.weight, mean=0.0, std=mean_weight_std)
+            else:
+                nn.init.normal_(last_layer.bias[0], mean=log_std_bias_mean, std=log_std_bias_std)
+                nn.init.normal_(last_layer.weight[0, :], mean=0.0, std=log_std_weight_std)
+                nn.init.normal_(last_layer.bias[1], mean=0.0, std=mean_bias_std)
+                nn.init.normal_(last_layer.weight[1, :], mean=0.0, std=mean_weight_std)
+        elif transform_type == "residual":
+            pass
+            # nn.init.normal_(last_layer.bias, mean=0.0, std=mean_bias_std)
+            # nn.init.normal_(last_layer.weight, mean=0.0, std=mean_weight_std)
 
         if transform_type == "affine":
             transform = ConditionalAffineScalarTransform(
@@ -599,6 +619,8 @@ def make_mlp_structure_transform(
                 conditional_std=not homoskedastic,
                 min_scale=min_std,
             )
+        elif transform_type == "residual":
+            transform = ConditionalResidualTransform(net=param_net)
         transforms.append(transform)
 
     structure_trf = NormalizingFlow(transforms)
@@ -627,25 +649,29 @@ def make_lipschitz_monotonic_mlp_structure_transform(
     """
 
     if transform_type in ["affine", "sparse_affine"]:
-        context_size = None
         input_factor = 2 if concat_masks_to_parents else 1
         features = (
             [input_factor * dim_z]
             + [hidden_units for _ in range(hidden_layers)]
             + [1 if homoskedastic else 2]
         )
-    else:
+    elif transform_type == "residual":
         context_factor = 2 if concat_masks_to_parents else 1
         context_size = context_factor * dim_z
         features = [1 + context_size] + [hidden_units for _ in range(hidden_layers)] + [1]
+    else:
+        raise ValueError(transform_type)
 
     monotonic_constraint_mask = None
     if monotonic_constraints is not None and monotonic_constraints != "none":
         if monotonic_constraints == "all":
-            # None applies monotonic constraints to all inputs
-            monotonic_constraint_mask = None
+            monotonic_constraint_mask = torch.ones(features[0])
         elif monotonic_constraints == "non_mask":
-            monotonic_constraint_mask = torch.ones(1 + dim_z)
+            num_non_mask_features = (
+                features[0] if not concat_masks_to_parents else features[0] - dim_z
+            )
+
+            monotonic_constraint_mask = torch.ones(num_non_mask_features)
             if concat_masks_to_parents:
                 monotonic_constraint_mask = torch.cat(
                     [monotonic_constraint_mask, torch.zeros(dim_z)]
@@ -686,11 +712,14 @@ def make_lipschitz_monotonic_mlp_structure_transform(
             )
         elif transform_type == "residual":
             # Needed for invertibility
-            assert lipschitz_const < 1.0
+            # assert lipschitz_const < 1.0
             transform = ConditionalResidualTransform(net=param_net)
+        else:
+            raise ValueError(transform_type)
         transforms.append(transform)
 
-    structure_trf = NormalizingFlow(transforms)
+    # structure_trf = NormalizingFlow(transforms)
+    structure_trf = transform
 
     return structure_trf
 
@@ -701,7 +730,8 @@ def make_linear_structure_transform(
     min_std,
     concat_masks_to_parents=True,
     initialization="default",
-    n_transforms=1
+    n_transforms=1,
+    transform_type="linear",
 ):
     """
     Utility function that constructs an invertible transformation for causal mechanisms
@@ -760,6 +790,20 @@ def make_linear_structure_transform(
         transform = ConditionalLinearTransform(
             param_net=param_net, features=1, conditional_std=not homoskedastic, min_scale=min_std
         )
+        if transform_type == "linear":
+            transform = ConditionalLinearTransform(
+                param_net=param_net,
+                features=1,
+                conditional_std=not homoskedastic,
+                min_scale=min_std,
+            )
+        elif transform_type == "sparse_linear":
+            transform = SparseConditionalLinearTransform(
+                param_net=param_net,
+                features=1,
+                conditional_std=not homoskedastic,
+                min_scale=min_std,
+            )
         transforms.append(transform)
 
     structure_trf = NormalizingFlow(transforms)

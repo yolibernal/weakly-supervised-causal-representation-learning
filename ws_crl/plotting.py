@@ -67,11 +67,24 @@ def init_plt():
             "ytick.major.size": 4,
             "ytick.minor.left": True,
             "ytick.minor.size": 2,
+            # SVGs
+            "svg.fonttype": "none",
         }
     )
 
 
-def plot_importance_matrix(cfg, metrics, latent_type: str, filename=None, artifact_folder=None):
+def save_plot(fig, filename, artifact_folder=None, save_to_mlflow=True):
+    fig.savefig(filename)
+    if save_to_mlflow:
+        mlflow.log_artifact(
+            filename, artifact_folder if artifact_folder is not None else Path(filename).stem
+        )
+    plt.close(fig)
+
+
+def plot_importance_matrix(
+    cfg, metrics, latent_type: str, filename=None, artifact_folder=None, save_to_mlflow=True
+):
     importance_matrix = generate_directed_graph_matrix(metrics, f"{latent_type}_importance_matrix_")
 
     fig, ax = plt.subplots()
@@ -88,11 +101,7 @@ def plot_importance_matrix(cfg, metrics, latent_type: str, filename=None, artifa
 
     fig.tight_layout()
     if filename is not None:
-        fig.savefig(filename)
-        mlflow.log_artifact(
-            filename, artifact_folder if artifact_folder is not None else Path(filename).stem
-        )
-        plt.close(fig)
+        save_plot(fig, filename, artifact_folder, save_to_mlflow=save_to_mlflow)
     else:
         fig.show()
 
@@ -104,9 +113,10 @@ def plot_latent_space(
     MAP_interventions,
     device,
     causal=False,
-    num_batches=None,
+    num_batches=10,
     filename=None,
     artifact_folder=None,
+    save_to_mlflow=True,
 ):
     fig, axes = plt.subplots(
         figsize=(cfg.model.dim_z * 4, cfg.model.dim_z * 4),
@@ -129,11 +139,7 @@ def plot_latent_space(
 
     fig.tight_layout()
     if filename is not None:
-        fig.savefig(filename)
-        mlflow.log_artifact(
-            filename, artifact_folder if artifact_folder is not None else Path(filename).stem
-        )
-        plt.close(fig)
+        save_plot(fig, filename, artifact_folder, save_to_mlflow=save_to_mlflow)
     else:
         fig.show()
 
@@ -150,6 +156,7 @@ def plot_latent_space_components(
     ax=None,
     filename=None,
     artifact_folder=None,
+    save_to_mlflow=True,
 ):
     assert len(components) == 2
 
@@ -213,17 +220,17 @@ def plot_latent_space_components(
     if fig_created:
         fig.tight_layout()
         if filename is not None:
-            fig.savefig(filename)
-            mlflow.log_artifact(
-                filename, artifact_folder if artifact_folder is not None else Path(filename).stem
-            )
-            plt.close(fig)
+            save_plot(fig, filename, artifact_folder, save_to_mlflow=save_to_mlflow)
         else:
             fig.show()
 
 
 def plot_average_intervention_posterior(
-    cfg, average_intervention_posterior, filename=None, artifact_folder=None
+    cfg,
+    average_intervention_posterior,
+    filename=None,
+    artifact_folder=None,
+    save_to_mlflow=True,
 ):
     num_interventions = cfg.data.dim_z + 1
 
@@ -242,11 +249,7 @@ def plot_average_intervention_posterior(
 
     fig.tight_layout()
     if filename is not None:
-        fig.savefig(filename)
-        mlflow.log_artifact(
-            filename, artifact_folder if artifact_folder is not None else Path(filename).stem
-        )
-        plt.close(fig)
+        save_plot(fig, filename, artifact_folder, save_to_mlflow=save_to_mlflow)
     else:
         fig.show()
 
@@ -261,6 +264,7 @@ def plot_noise_pairs(
     intervention_type="intervened",
     filename=None,
     artifact_folder=None,
+    save_to_mlflow=True,
 ):
     assert intervention_type in ["intervened", "unintervened", "all"]
 
@@ -380,22 +384,18 @@ def plot_noise_pairs(
 
     fig.tight_layout()
     if filename is not None:
-        fig.savefig(filename)
-        mlflow.log_artifact(
-            filename, artifact_folder if artifact_folder is not None else Path(filename).stem
-        )
-        plt.close(fig)
+        save_plot(fig, filename, artifact_folder, save_to_mlflow=save_to_mlflow)
     else:
         fig.show()
 
 
-def plot_x(cfg, x, ax=None):
+def plot_x(cfg, x, ax=None, x1=None, plot_arrows=False):
     fig_created = False
     if ax is None:
         fig, ax = plt.subplots()
         fig_created = True
 
-    if "encoder" in cfg.data:
+    if cfg and "encoder" in cfg.data:
         if cfg.data.encoder.type == "son":
             encoder = SONEncoder(input_features=cfg.data.dim_x, output_features=cfg.data.dim_z)
             encoder.load_state_dict(torch.load(Path(cfg.data.data_dir) / "encoder.pt"))
@@ -407,6 +407,10 @@ def plot_x(cfg, x, ax=None):
 
             x, _ = decoder(x.view(1, x.size(0)))
             x = x[0]
+
+            if x1 is not None:
+                x1, _ = decoder(x1.view(1, x1.size(0)))
+                x1 = x1[0]
         if cfg.data.encoder.type == "sbd":
             exp_dir = Path(cfg.data.encoder.exp_dir)
             decoder_cfg_path = exp_dir / "config.yml"
@@ -445,8 +449,23 @@ def plot_x(cfg, x, ax=None):
             x, _ = decoder(x.unsqueeze(0), deterministic=True)
             x = x[0]
 
-    if cfg.data.type == "xy_pairs":
+    if not cfg or cfg.data.type == "image":
+        x = x.clamp(0, 1).mul(255).cpu().to(torch.uint8)
+        ax.imshow(x)
+        ax.axis("off")
+    elif cfg.data.type == "xy_pairs":
         # data is concatenated xy pairs, i.e. [x1, y1, x2, y2, ...]
+
+        # x1_mean = torch.tensor(cfg.data.x1_mean)
+        # x1_std = torch.tensor(cfg.data.x1_std)
+        # x2_mean = torch.tensor(cfg.data.x2_mean)
+        # x2_std = torch.tensor(cfg.data.x2_std)
+
+        # x_mean = (x1_mean + x2_mean) / 2
+        # x_std = (x1_std + x2_std) / 2
+
+        # x = x * x_std.to(x.device) + x_mean.to(x.device)
+
         x = x.cpu().numpy()
 
         assert len(x) % 2 == 0
@@ -460,6 +479,42 @@ def plot_x(cfg, x, ax=None):
 
         ax.scatter(x[::2], x[1::2], c=colors)
 
+        if x1 is not None:
+            x1 = x1.cpu().numpy()
+            ax.scatter(x1[::2], x1[1::2], c=colors, marker="x", alpha=0.5)
+
+        if plot_arrows:
+            assert x1 is not None
+            for i in range(len(x) // 2):
+                ax.arrow(
+                    x1[2 * i],
+                    x1[2 * i + 1],
+                    x[2 * i] - x1[2 * i],
+                    x[2 * i + 1] - x1[2 * i + 1],
+                    head_width=0.05,
+                    head_length=0.1,
+                    fc=colors[i % len(colors)],
+                    ec=colors[i % len(colors)],
+                    length_includes_head=True,
+                    alpha=0.3,
+                )
+
+        # add margins
+        ax.margins(0.1, 0.1)
+    elif cfg.data.type == "y_pos":
+        # data is concatenated xy pairs, i.e. [x1, y1, x2, y2, ...]
+        x = x.cpu().numpy()
+
+        color_pool = list(mcolors.BASE_COLORS.keys())
+
+        if len(x) < len(color_pool):
+            colors = color_pool[: len(x)]
+        else:
+            colors = None
+
+        offsets = np.arange(0, len(x))
+        ax.scatter(offsets, x, c=colors)
+
         # add margins
         ax.margins(0.1, 0.1)
     elif cfg.data.type == "image":
@@ -468,12 +523,21 @@ def plot_x(cfg, x, ax=None):
     else:
         raise ValueError(f"Unknown data type: {cfg.data.type}")
 
+    # plt.show()
     if fig_created:
         plt.close(fig)
 
 
 def plot_reconstructions(
-    cfg, model, loader, device, n_samples=12, filename=None, artifact_folder=None
+    cfg,
+    model,
+    loader,
+    device,
+    n_samples=12,
+    filename=None,
+    encode_to_causal=False,
+    artifact_folder=None,
+    save_to_mlflow=True,
 ):
     nrows = n_samples
     ncols = 4  # x1, x1_reco, x2, x2_reco
@@ -490,8 +554,16 @@ def plot_reconstructions(
     if len(x2s.shape) > 2:
         x2s = x2s[:, -1]
 
-    x1s_reco = model.encode_decode(x1s)
-    x2s_reco = model.encode_decode(x2s)
+    if encode_to_causal:
+        x1s_reco = model.decode_causal(
+            model.encode_to_causal(x1s, deterministic=True), deterministic=True
+        )
+        x2s_reco = model.decode_causal(
+            model.encode_to_causal(x2s, deterministic=True), deterministic=True
+        )
+    else:
+        x1s_reco = model.encode_decode(x1s)
+        x2s_reco = model.encode_decode(x2s)
 
     for i in range(n_samples):
         plot_x(cfg, x1s[i], ax=axes[i, 0])
@@ -512,11 +584,7 @@ def plot_reconstructions(
 
     fig.tight_layout()
     if filename is not None:
-        fig.savefig(filename)
-        mlflow.log_artifact(
-            filename, artifact_folder if artifact_folder is not None else Path(filename).stem
-        )
-        plt.close(fig)
+        save_plot(fig, filename, artifact_folder, save_to_mlflow=save_to_mlflow)
     else:
         fig.show()
 
@@ -530,6 +598,7 @@ def plot_counterfactuals(
     intervention_scale=1.0,
     filename=None,
     artifact_folder=None,
+    save_to_mlflow=True,
 ):
     nrows = n_samples
     ncols = 2 + cfg.model.dim_z  # x, empty intervention, e1, e2, ...
@@ -561,7 +630,7 @@ def plot_counterfactuals(
         plot_x(cfg, x1s_reco[i], ax=axes[i, 1])
 
         for j in range(cfg.model.dim_z):
-            plot_x(cfg, x1s_intervened[i, j], ax=axes[i, 2 + j])
+            plot_x(cfg, x1s_intervened[i, j], ax=axes[i, 2 + j], x1=x1s[i], plot_arrows=True)
 
         axes[i, 0].set_xlabel("$x$")
         axes[i, 1].set_xlabel("$\widehat{x}$")
@@ -575,11 +644,146 @@ def plot_counterfactuals(
 
     fig.tight_layout()
     if filename is not None:
-        fig.savefig(filename)
-        mlflow.log_artifact(
-            filename, artifact_folder if artifact_folder is not None else Path(filename).stem
+        save_plot(fig, filename, artifact_folder, save_to_mlflow=save_to_mlflow)
+    else:
+        fig.show()
+
+
+def intervene(
+    model,
+    z,
+    component,
+    mode="sample_uniform",
+    perfect=True,
+    value=None,
+    intervention_type="decode_noise_to_causal",
+):
+    z_intervened = z.clone()
+    if mode == "sample":
+        mean = torch.mean(z[:, component])
+        std = torch.std(z[:, component])
+        delta = torch.randn_like(z[:, component]) * std + mean
+    elif mode == "sample_uniform":
+        zmin, zmax = torch.min(z[:, component]), torch.max(z[:, component])
+        delta = torch.distributions.uniform.Uniform(zmin, zmax).sample(z[:, component].shape)
+    elif mode == "mean":
+        delta = torch.mean(z[:, component])
+    elif mode == "fixed":
+        assert value is not None
+        delta = value
+
+    z_intervened[:, component] = delta
+
+    if not perfect:
+        z_intervened[:, component] += z[:, component]
+
+    if intervention_type == "decode_noise_to_causal":
+        x_intervened = model.decode_causal(
+            model.scm.noise_to_causal(z_intervened), deterministic=True
         )
-        plt.close(fig)
+    elif intervention_type == "decode_noise":
+        x_intervened = model.decode_noise(z_intervened, deterministic=True)
+    elif intervention_type == "decode_causal":
+        x_intervened = model.decode_causal(z_intervened, deterministic=True)
+
+    return x_intervened, z_intervened
+
+
+def plot_counterfactual_sequences(
+    cfg,
+    model,
+    loader,
+    device,
+    n_samples=4,
+    n_interventions=5,
+    intervention_scale=1.0,
+    filename=None,
+    artifact_folder=None,
+    intervention_type="decode_noise_to_causal",
+    save_to_mlflow=True,
+):
+    nrows = n_samples * cfg.model.dim_z
+    ncols = 1 + n_interventions  # x, intervention_1, intervention_2, ...
+    fig, axes = plt.subplots(
+        nrows=nrows, ncols=ncols, figsize=(2 * ncols, 2 * nrows), sharex=True, sharey=True
+    )
+
+    # Get data
+    x1s, x2s, *_ = get_first_batch(loader)
+    x1s, x2s = x1s.to(device), x2s.to(device)
+
+    eps1s = model.encode_to_noise(x1s, deterministic=True)
+    eps1s_std = eps1s.std(dim=0)
+
+    # eps2s = model.encode_to_noise(x2s, deterministic=True)
+    # eps2s_std = eps2s.std(dim=0)
+
+    epss_std = eps1s_std
+
+    if intervention_type == "decode_causal":
+        component_std = torch.std(model.scm.noise_to_causal(eps1s), dim=0)
+    else:
+        component_std = eps1s_std
+
+    eps1s = eps1s[:n_samples]
+    x1s_reco = model.decode_noise(eps1s, deterministic=True)
+    # x1s_reco = model.decode_causal(model.scm.noise_to_causal(eps1s), deterministic=True)
+
+    subfigures = fig.subfigures(cfg.model.dim_z)
+
+    for component in range(cfg.model.dim_z):
+        axes = subfigures[component].subplots(
+            nrows=n_samples, ncols=ncols, sharex=True, sharey=True
+        )
+        subfigures[component].suptitle(f"Component {component + 1}")
+
+        values = torch.linspace(
+            -intervention_scale * component_std[component],
+            intervention_scale * component_std[component],
+            n_interventions,
+        ).to(device)
+
+        x1s_intervened = torch.zeros((n_samples, n_interventions, cfg.model.dim_x)).to(device)
+        for i, value in enumerate(values):
+            # intervention_i = torch.zeros((1, cfg.model.dim_z)).to(device)
+            # intervention_i[:, component] = value
+            # eps1s_intervened_i = eps1s + intervention_i
+            # x_intervened = model.decode_noise(eps1s_intervened_i, deterministic=True)
+            if intervention_type == "decode_causal":
+                z = model.scm.noise_to_causal(eps1s)
+            else:
+                z = eps1s
+
+            x_intervened, _ = intervene(
+                model,
+                z,
+                component,
+                mode="fixed",
+                value=value,
+                intervention_type=intervention_type,
+            )
+            x1s_intervened[:, i, :] = x_intervened
+
+        for i in range(n_samples):
+            plot_x(cfg, x1s_reco[i], ax=axes[i, 0])
+
+            for j in range(n_interventions):
+                plot_x(
+                    cfg,
+                    x1s_intervened[i, j],
+                    ax=axes[i, j + 1],
+                    x1=x1s_reco[i],
+                    plot_arrows=True,
+                )
+
+    for i in range(nrows):
+        for j in range(ncols):
+            # axes[i, j].axis("off")
+            pass
+
+    fig.tight_layout()
+    if filename is not None:
+        save_plot(fig, filename, artifact_folder, save_to_mlflow=save_to_mlflow)
     else:
         fig.show()
 
@@ -591,10 +795,12 @@ def plot_solution_function_responses(
     MAP_interventions,
     device,
     n=50,
+    n_samples=10,
     domain=(-3, 3),
     sort_by_MAP_interventions=True,
     filename=None,
     artifact_folder=None,
+    save_to_mlflow=True,
 ):
     fig, axes = plt.subplots(
         nrows=cfg.model.dim_z,
@@ -615,31 +821,51 @@ def plot_solution_function_responses(
             [list(MAP_components).index(i) for i in range(len(MAP_components))]
         )
 
-    e_mean = torch.zeros(cfg.model.dim_z)
-    for batch in loader:
-        *_, e1, e2 = batch
-        if len(e2.shape) > 2:
-            e2 = e2[:, -1]
-        e_mean += e1.squeeze().mean(dim=0)
-        e_mean += e2.squeeze().mean(dim=0)
-    e_mean /= len(loader) * 2
-
     x_min, x_max = domain
-    values = torch.linspace(x_min, x_max, n).to(device)
-    solution_function_responses = torch.zeros(cfg.model.dim_z, n, cfg.model.dim_z)
 
-    for i in range(cfg.model.dim_z):
-        e = e_mean.repeat(n, 1).to(device)
-        e[:, i] = values
-        solution_function_responses[MAP_components_inverse[i]] = model.scm.noise_to_causal(e)[
-            :, MAP_components
-        ]
+    x1s = []
+    samples_collected = 0
+    for (
+        i,
+        (x1, *_),
+    ) in enumerate(loader):
+        x1 = x1.to(device)
+        x1s.append(x1)
+        samples_collected += x1.size(0)
+        if samples_collected >= n_samples:
+            break
+    x1s = torch.cat(x1s, dim=0)
+    x1s = x1s[:n_samples]
 
-    for i in range(cfg.model.dim_z):
-        for j in range(cfg.model.dim_z):
-            ax = axes[i, j]
-            ax.plot(values.cpu(), solution_function_responses[i, :, j].cpu())
-            ax.set_title(f"$s_{j+1}(e)$, varying $e_{i+1}$")
+    x1, *_ = get_first_batch(loader)
+    x1 = x1.to(device)
+    e1s = model.encode_to_noise(x1)
+
+    e1s = e1s[:n_samples]
+
+    for e1 in e1s:
+        values = torch.linspace(x_min, x_max, n).to(device)
+        solution_function_responses = torch.zeros(cfg.model.dim_z, n, cfg.model.dim_z)
+
+        for i in range(cfg.model.dim_z):
+            e = e1.repeat(n, 1).to(device)
+            e[:, i] = values
+            if sort_by_MAP_interventions:
+                solution_function_responses[MAP_components_inverse[i]] = model.scm.noise_to_causal(
+                    e
+                )[:, MAP_components]
+            else:
+                solution_function_responses[i] = model.scm.noise_to_causal(e)
+
+        for i in range(cfg.model.dim_z):
+            for j in range(cfg.model.dim_z):
+                ax = axes[i, j]
+                ax.plot(
+                    values.detach().cpu(),
+                    solution_function_responses[i, :, j].detach().cpu(),
+                    alpha=0.5,
+                )
+                ax.set_title(f"$s_{j+1}(e)$, varying $e_{i+1}$")
 
     # title
     fig.suptitle(
@@ -647,28 +873,32 @@ def plot_solution_function_responses(
         fontsize=20,
     )
 
-    plt.figtext(
-        0.5,
-        0.01,
-        f"Mapping from model components: {list(MAP_components.cpu().numpy())}",
-        wrap=True,
-        horizontalalignment="center",
-        fontsize=12,
-    )
+    if sort_by_MAP_interventions:
+        plt.figtext(
+            0.5,
+            0.01,
+            f"Mapping from model components: {list(MAP_components.cpu().numpy())}",
+            wrap=True,
+            horizontalalignment="center",
+            fontsize=12,
+        )
 
     margin = 0.03
     fig.tight_layout(rect=[margin, margin, 1 - margin, 1 - margin])
     if filename is not None:
-        fig.savefig(filename)
-        mlflow.log_artifact(
-            filename, artifact_folder if artifact_folder is not None else Path(filename).stem
-        )
-        plt.close(fig)
+        save_plot(fig, filename, artifact_folder, save_to_mlflow=save_to_mlflow)
     else:
         fig.show()
 
 
-def plot_graph(cfg, adjacency_matrix, MAP_interventions=None, filename=None, artifact_folder=None):
+def plot_graph(
+    cfg,
+    adjacency_matrix,
+    MAP_interventions=None,
+    filename=None,
+    artifact_folder=None,
+    save_to_mlflow=True,
+):
     adjacency_matrix = adjacency_matrix.cpu().numpy()
     G = nx.from_numpy_array(adjacency_matrix, create_using=nx.DiGraph)
 
@@ -723,11 +953,52 @@ def plot_graph(cfg, adjacency_matrix, MAP_interventions=None, filename=None, art
 
         if filename is not None:
             plt.savefig(filename)
-            mlflow.log_artifact(
-                filename, artifact_folder if artifact_folder is not None else Path(filename).stem
-            )
+            if save_to_mlflow:
+                mlflow.log_artifact(
+                    filename,
+                    artifact_folder if artifact_folder is not None else Path(filename).stem,
+                )
             plt.close()
         else:
             plt.show()
     except StopIteration:
         pass
+
+
+def plot_grid(cfg, x, nrows=4, ncols=4, filename=None):
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=(2.5 * ncols, nrows * 2.5),
+        sharex=True,
+        sharey=True,
+    )
+    for i in range(nrows):
+        for j in range(ncols):
+            plot_x(cfg, x[i * ncols + j], axes[i, j])
+
+    fig.tight_layout()
+    if filename:
+        save_plot(fig, filename, save_to_mlflow=False)
+
+
+def plot_columns(cfg, xs, nrows=4, col_names=None, filename=None):
+    ncols = len(xs)
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=(2.5 * ncols, nrows * 2.5),
+        sharex=True,
+        sharey=True,
+    )
+    for i in range(nrows):
+        for j in range(ncols):
+            plot_x(cfg, xs[j][i], axes[i, j])
+
+    if col_names:
+        for j in range(ncols):
+            axes[0, j].set_title(col_names[j])
+
+    fig.tight_layout()
+    if filename:
+        save_plot(fig, filename, save_to_mlflow=False)

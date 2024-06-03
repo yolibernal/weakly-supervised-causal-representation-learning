@@ -45,7 +45,7 @@ def dependance(
     return difference
 
 
-def solution_dependance_on_noise(model, i, j, noise):
+def solution_dependance_on_noise(model, i, j, noise, concat_mask=True):
     """Tests whether solution s_i depends on noise variable e_j"""
 
     transform = model.scm.solution_functions[i]
@@ -53,13 +53,13 @@ def solution_dependance_on_noise(model, i, j, noise):
 
     mask_ = torch.ones_like(noise)
     mask_[:, i] = 0
-    context = mask(noise, mask_)
+    context = mask(noise, mask_, concat_mask=concat_mask)
 
     # Note that we need to invert here b/c the transform is defined from z to e
     return dependance(transform, inputs, context, j, invert=True)
 
 
-def find_topological_order(model, noise):
+def find_topological_order(model, noise, concat_mask=True):
     """
     Extracts the topological order from a noise-centric model by iteratively looking for the
     least-dependant solution function
@@ -74,7 +74,7 @@ def find_topological_order(model, noise):
 
         mask_ = torch.ones_like(noise)
         mask_[:, i] = 0
-        context = mask(noise, mask_)
+        context = mask(noise, mask_, concat_mask=concat_mask)
 
         # Note that we need to invert here b/c the transform is defined from z to e
         return dependance(transform, inputs, context, j, invert=True)
@@ -173,7 +173,7 @@ def construct_causal_mechanisms(model, topological_order):
     return causal_mechanisms
 
 
-def compute_implicit_causal_effects(model, noise):
+def compute_implicit_causal_effects(model, noise, concat_mask=True):
     """Tests whether a causal mechanism f_i depends on a particular causal variable z_j"""
 
     model.eval()
@@ -182,7 +182,7 @@ def compute_implicit_causal_effects(model, noise):
     causal_effect = torch.zeros((model.dim_z, model.dim_z))
     # causal_effect[j,i] quantifies how strongly z_j influences z_i
 
-    topological_order = find_topological_order(model, noise)
+    topological_order = find_topological_order(model, noise, concat_mask=concat_mask)
     mechanisms = construct_causal_mechanisms(model, topological_order)
 
     for pos, i in enumerate(topological_order):

@@ -374,6 +374,14 @@ class ImplicitSCM(nn.Module):
         super().load_state_dict(state_dict, strict)
         self._compute_ancestors()
 
+    def compute_solution_function_regularization(self):
+        regularization_terms = 0.0
+        for i in range(self.dim_z):
+            # if solution function has compute_regularization_term, add the term
+            if hasattr(self.solution_functions[i], "compute_regularization_term"):
+                regularization_terms += self.solution_functions[i].compute_regularization_term()
+        return torch.tensor(regularization_terms)
+
 
 class MLPImplicitSCM(ImplicitSCM):
     """MLP-based implementation of ILCMs"""
@@ -536,6 +544,8 @@ class LinearImplicitSCM(ImplicitSCM):
         base_density=DEFAULT_BASE_DENSITY,
         homoskedastic=True,
         min_std=None,
+        transform_type="affine",
+        n_transforms=1,
         concat_masks_to_parents=True,
     ):
         solution_functions = []
@@ -575,7 +585,9 @@ class LinearImplicitSCM(ImplicitSCM):
                     homoskedastic,
                     min_std=min_std,
                     initialization="broad",
+                    transform_type=transform_type,
                     concat_masks_to_parents=concat_masks_to_parents,
+                    n_transforms=n_transforms,
                 )
             )
 
