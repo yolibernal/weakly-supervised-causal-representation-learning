@@ -83,22 +83,30 @@ def make_mlp(features, activation="relu", final_activation=None, initial_activat
 def make_lipschitz_monotonic_mlp(
     features,
     monotonic_constraints=None,
-    kind="one-inf",
+    kind="default",
     lipschitz_const=1.0,
     n_groups=2,
 ):
     if len(features) >= 2:
+        layer_lipschitz_const = lipschitz_const ** (1 / (len(features) - 1))
         layers = []
-        for in_, out in zip(features[:-2], features[1:-1]):
+        for i, (in_, out) in enumerate(zip(features[:-2], features[1:-1])):
+            if kind == "default":
+                _kind = "one-inf" if i == 0 else "inf"
+            else:
+                _kind = kind
             layers.append(
-                lmn.LipschitzLinear(in_, out, kind=kind, lipschitz_const=lipschitz_const),
+                lmn.LipschitzLinear(in_, out, kind=_kind, lipschitz_const=layer_lipschitz_const),
             )
             layers.append(
                 lmn.GroupSort(n_groups=n_groups),
             )
         layers.append(
             lmn.LipschitzLinear(
-                features[-2], features[-1], kind=kind, lipschitz_const=lipschitz_const
+                features[-2],
+                features[-1],
+                kind=kind if kind != "default" else "inf",
+                lipschitz_const=layer_lipschitz_const,
             )
         )
 
@@ -108,7 +116,7 @@ def make_lipschitz_monotonic_mlp(
                 net, monotonic_constraints=monotonic_constraints, lipschitz_const=lipschitz_const
             )
     else:
-        net = nn.Identity()
+        net = nn.Identity() * lipschitz_const
 
     net = ConditionalWrapper(net)
     return net
