@@ -250,6 +250,7 @@ class SparseConditionalAffineScalarTransform(nflows.transforms.Transform):
         )
         return complexity_loss
 
+
 class ConditionalLinearTransform(nflows.transforms.Transform):
     def __init__(self, param_net=None, features=None, conditional_std=True, min_scale=None):
         super().__init__()
@@ -306,6 +307,7 @@ class ConditionalLinearTransform(nflows.transforms.Transform):
         scale, shift, logabsdet = self.get_scale_and_shift(context)
         outputs = inputs * scale + shift
         return outputs, -1 / logabsdet
+
 
 class SparseConditionalLinearTransform(nflows.transforms.Transform):
     """
@@ -405,7 +407,6 @@ class SparseConditionalLinearTransform(nflows.transforms.Transform):
             self.log_alpha - self.beta * torch.log(-self.gamma / self.zeta)
         )
         return complexity_loss
-
 
 
 def batch_jacobian(g, x):
@@ -676,6 +677,24 @@ def make_lipschitz_monotonic_mlp_structure_transform(
                 monotonic_constraint_mask = torch.cat(
                     [monotonic_constraint_mask, torch.zeros(dim_z)]
                 )
+        elif monotonic_constraints == "context":
+            if transform_type == "residual":
+                monotonic_constraint_mask = torch.ones(features[0])
+                monotonic_constraint_mask[0] = 0
+            else:
+                monotonic_constraint_mask = torch.ones(features[0])
+        elif monotonic_constraints == "context_non_mask":
+            num_non_mask_features = (
+                features[0] if not concat_masks_to_parents else features[0] - dim_z
+            )
+
+            monotonic_constraint_mask = torch.ones(num_non_mask_features)
+            if concat_masks_to_parents:
+                monotonic_constraint_mask = torch.cat(
+                    [monotonic_constraint_mask, torch.zeros(dim_z)]
+                )
+            if transform_type == "residual":
+                monotonic_constraint_mask[0] = 0
         else:
             assert isinstance(monotonic_constraints, list)
             monotonic_constraint_mask = monotonic_constraints
@@ -718,8 +737,7 @@ def make_lipschitz_monotonic_mlp_structure_transform(
             raise ValueError(transform_type)
         transforms.append(transform)
 
-    # structure_trf = NormalizingFlow(transforms)
-    structure_trf = transform
+    structure_trf = NormalizingFlow(transforms)
 
     return structure_trf
 
@@ -787,9 +805,6 @@ def make_linear_structure_transform(
             nn.init.normal_(param_net.bias[1], mean=0.0, std=mean_bias_std)
             nn.init.normal_(param_net.weight[1, :], mean=0.0, std=mean_weight_std)
 
-        transform = ConditionalLinearTransform(
-            param_net=param_net, features=1, conditional_std=not homoskedastic, min_scale=min_std
-        )
         if transform_type == "linear":
             transform = ConditionalLinearTransform(
                 param_net=param_net,
