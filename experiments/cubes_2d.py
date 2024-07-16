@@ -63,6 +63,7 @@ from ws_crl.utils import (
     calculate_intervention_posteriors,
     generate_directed_graph_matrix,
 )
+from torch import nn
 
 
 @hydra.main(
@@ -194,6 +195,38 @@ def create_scm(cfg):
             homoskedastic=cfg.model.scm.homoskedastic,
             dim_z=cfg.model.dim_z,
             min_std=cfg.model.scm.min_std,
+            transform_type="linear",
+            n_transforms=cfg.model.scm.n_transforms if "n_transforms" in cfg.model.scm else 1,
+            concat_masks_to_parents=(
+                cfg.model.scm.concat_masks_to_parents
+                if "concat_masks_to_parents" in cfg.model.scm
+                else True
+            ),
+        )
+    elif noise_centric and cfg.model.scm.type == "sparse_linear":
+        scm = LinearImplicitSCM(
+            graph_parameterization=cfg.model.scm.adjacency_matrix,
+            manifold_thickness=cfg.model.scm.manifold_thickness,
+            homoskedastic=cfg.model.scm.homoskedastic,
+            dim_z=cfg.model.dim_z,
+            min_std=cfg.model.scm.min_std,
+            transform_type="sparse_linear",
+            n_transforms=cfg.model.scm.n_transforms if "n_transforms" in cfg.model.scm else 1,
+            concat_masks_to_parents=(
+                cfg.model.scm.concat_masks_to_parents
+                if "concat_masks_to_parents" in cfg.model.scm
+                else True
+            ),
+        )
+    elif noise_centric and cfg.model.scm.type == "residual_mlp":
+        scm = MLPImplicitSCM(
+            graph_parameterization=cfg.model.scm.adjacency_matrix,
+            manifold_thickness=cfg.model.scm.manifold_thickness,
+            hidden_units=cfg.model.scm.hidden_units,
+            hidden_layers=cfg.model.scm.hidden_layers,
+            homoskedastic=cfg.model.scm.homoskedastic,
+            dim_z=cfg.model.dim_z,
+            transform_type="residual",
             n_transforms=cfg.model.scm.n_transforms if "n_transforms" in cfg.model.scm else 1,
             concat_masks_to_parents=(
                 cfg.model.scm.concat_masks_to_parents
@@ -364,6 +397,60 @@ def train(cfg, model):
     step = 0
     nan_counter = 0
     epoch_generator = trange(cfg.training.epochs, disable=not cfg.general.verbose)
+
+    if (
+        "pretrain_context_invariance" in cfg.training
+        and cfg.training.pretrain_context_invariance.epochs is not None
+    ):
+        logger.info("Pretraining context invariance")
+        for i, solution_function in enumerate(model.scm.solution_functions):
+            n = cfg.training.pretrain_context_invariance.samples
+            e_train = (
+                torch.rand(n, cfg.model.dim_z)
+                * (
+                    cfg.training.pretrain_context_invariance.e_max
+                    - cfg.training.pretrain_context_invariance.e_min
+                )
+                + cfg.training.pretrain_context_invariance.e_min
+            )
+            z_train = (
+                e_train[:, i] * cfg.model.scm.lipschitz_const
+                + torch.randn(n) * cfg.training.pretrain_context_invariance.noise_std
+            )
+            e_train, z_train = e_train.to(device), z_train.to(device)
+
+            pretrain_epochs = cfg.training.pretrain_context_invariance.epochs
+            batch_size = cfg.training.pretrain_context_invariance.batch_size
+            n_batches = n // batch_size
+            optimizer = torch.optim.Adam(
+                solution_function.parameters(),
+                lr=cfg.training.pretrain_context_invariance.learning_rate,
+            )
+            criterion = nn.MSELoss()
+
+            for epoch in range(pretrain_epochs):
+                for i_batch in range(n_batches):
+                    e_batch = e_train[i_batch * batch_size : (i_batch + 1) * batch_size]
+                    z_batch = z_train[i_batch * batch_size : (i_batch + 1) * batch_size]
+
+                    optimizer.zero_grad()
+                    # context = torch.concatenate([e_batch[:, 0:1], e_batch], dim=1)
+                    context = e_batch
+                    masked_epsilon = model.scm.get_masked_context(i, context, adjacency_matrix=None)
+                    z_pred, _ = solution_function.inverse(
+                        e_batch[:, i : i + 1], context=masked_epsilon
+                    )
+                    loss = criterion(z_pred.squeeze(), z_batch)
+                    loss.backward()
+                    optimizer.step()
+
+            with torch.no_grad():
+                for param in solution_function.parameters():
+                    param.add_(
+                        torch.randn(param.size(), device=device)
+                        * cfg.training.pretrain_context_invariance.weight_noise_std
+                    )
+
     for epoch in epoch_generator:
         mlflow.log_metric("train.epoch", epoch, step=step)
 
@@ -371,12 +458,30 @@ def train(cfg, model):
         graph_kwargs = determine_graph_learning_settings(cfg, epoch, model)
 
         # Epoch-based schedules
-        model_interventions, pretrain, deterministic_intervention_encoder = epoch_schedules(
-            cfg, model, epoch, optim
-        )
+        (
+            model_interventions,
+            pretrain,
+            deterministic_intervention_encoder,
+            introduce_child_interventions,
+        ) = epoch_schedules(cfg, model, epoch, optim)
 
         for x1, x2, z1, z2, intervention_labels, true_interventions in train_loader:
             fractional_epoch = step / steps_per_epoch
+
+            if not introduce_child_interventions:
+                child_intervention_labels = torch.tensor(cfg.data.child_intervention_labels)
+                # filter out indices where intervention label in child interventions
+                indices = torch.where(
+                    ~torch.any(intervention_labels[:, None] == child_intervention_labels, dim=1)
+                )[0]
+                x1, x2, z1, z2, intervention_labels, true_interventions = (
+                    x1[indices],
+                    x2[indices],
+                    z1[indices],
+                    z2[indices],
+                    intervention_labels[indices],
+                    true_interventions[indices],
+                )
 
             model.train()
 
@@ -392,7 +497,6 @@ def train(cfg, model):
                 intervention_entropy_regularization_amount,
                 intervention_encoder_offset,
                 solution_function_regularization_amount,
-                *_,
             ) = step_schedules(cfg, model, fractional_epoch)
 
             # GPU
@@ -418,6 +522,11 @@ def train(cfg, model):
                 model_interventions=model_interventions,
                 deterministic_intervention_encoder=deterministic_intervention_encoder,
                 intervention_encoder_offset=intervention_encoder_offset,
+                sample_from_intervention_posterior=(
+                    cfg.training.sample_from_intervention_posterior
+                    if "sample_from_intervention_posterior" in cfg.training
+                    else False
+                ),
                 **graph_kwargs,
             )
 
@@ -468,6 +577,17 @@ def train(cfg, model):
             if frequency_check(step, cfg.training.save_model_every_n_steps):
                 save_model(cfg, model, f"model_step_{step}.pt")
 
+        plot_epochs = [
+            cfg.training.model_interventions_after_epoch,
+            cfg.training.freeze_encoder_epoch,
+            cfg.training.fix_topological_order_epoch,
+            cfg.training.deterministic_intervention_encoder_after_epoch,
+        ]
+        if "introduce_child_interventions_after_epoch" in cfg.training:
+            plot_epochs.append(cfg.training.introduce_child_interventions_after_epoch)
+        if epoch in plot_epochs:
+            plot_loop(cfg, model, val_loader, val_metrics, device, step)
+
         # LR scheduler
         if scheduler is not None and epoch < cfg.training.epochs - 1:
             scheduler.step()
@@ -476,6 +596,7 @@ def train(cfg, model):
             # Optionally reset Adam stats
             if (
                 cfg.training.lr_schedule.type == "cosine_restarts_reset"
+                # and "restart_every_epochs" in cfg.training.lr_schedule
                 and (epoch + 1) % cfg.training.lr_schedule.restart_every_epochs == 0
                 and epoch + 1 < cfg.training.epochs
             ):
@@ -561,6 +682,8 @@ def load_dataset(cfg, tag, include_noise_encodings=True, normalize=True):
 
     x1, x2, z1, z2, intervention_labels, true_interventions, *_ = data
 
+    intervention_labels = intervention_labels.int()
+
     device = x1.device
 
     if len(x2.shape) > 2:
@@ -623,6 +746,7 @@ def validation_loop(cfg, model, criteria, val_loader, best_state, val_metrics, s
 
     loss, nll, metrics = compute_metrics_on_dataset(cfg, model, criteria, val_loader, device)
     metrics.update(eval_dci_scores(cfg, model, test_loader=val_loader))
+    metrics.update(eval_dci_scores(cfg, model, test_loader=val_loader, interventional=True))
     metrics.update(eval_implicit_graph(cfg, model, dataloader=val_loader))
 
     # Store validation metrics (and track with MLflow)
@@ -644,12 +768,17 @@ def validation_loop(cfg, model, criteria, val_loader, best_state, val_metrics, s
         best_state["step"] = step
 
 
-def plot_loop(cfg, model, loader, metrics, device, step):
+def plot_loop(
+    cfg, model, loader, metrics, device, step, format="pdf", save_to_mlflow=True, plot_dir=None
+):
     model.eval()
     model.to(device)
 
     with torch.no_grad():
-        plot_dir = Path(cfg.general.exp_dir) / "figures"
+        if plot_dir is None:
+            plot_dir = Path(cfg.general.exp_dir) / "figures"
+        else:
+            plot_dir = Path(plot_dir)
         plot_dir.mkdir(parents=True, exist_ok=True)
 
         intervention_posterior, intervention_label = calculate_intervention_posteriors(
@@ -664,15 +793,17 @@ def plot_loop(cfg, model, loader, metrics, device, step):
             cfg,
             metrics,
             "noise",
-            filename=plot_dir / f"importance_matrix_noise_step_{step}.pdf",
+            filename=plot_dir / f"importance_matrix_noise_step_{step}.{format}",
             artifact_folder="importance_matrix_noise",
+            save_to_mlflow=save_to_mlflow,
         )
         plot_importance_matrix(
             cfg,
             metrics,
             "causal",
-            filename=plot_dir / f"importance_matrix_causal_step_{step}.pdf",
+            filename=plot_dir / f"importance_matrix_causal_step_{step}.{format}",
             artifact_folder="importance_matrix_causal",
+            save_to_mlflow=save_to_mlflow,
         )
         plot_latent_space(
             cfg,
@@ -681,8 +812,9 @@ def plot_loop(cfg, model, loader, metrics, device, step):
             MAP_interventions,
             device,
             causal=False,
-            filename=plot_dir / f"latent_space_noise_step_{step}.pdf",
+            filename=plot_dir / f"latent_space_noise_step_{step}.{format}",
             artifact_folder="latent_space_noise",
+            save_to_mlflow=save_to_mlflow,
         )
         plot_latent_space(
             cfg,
@@ -691,39 +823,45 @@ def plot_loop(cfg, model, loader, metrics, device, step):
             MAP_interventions,
             device,
             causal=True,
-            filename=plot_dir / f"latent_space_causal_step_{step}.pdf",
+            filename=plot_dir / f"latent_space_causal_step_{step}.{format}",
             artifact_folder="latent_space_causal",
+            save_to_mlflow=save_to_mlflow,
         )
         plot_average_intervention_posterior(
             cfg,
             average_intervention_posterior,
-            filename=plot_dir / f"average_intervention_posterior_step_{step}.pdf",
+            filename=plot_dir / f"average_intervention_posterior_step_{step}.{format}",
             artifact_folder="average_intervention_posterior",
+            save_to_mlflow=save_to_mlflow,
         )
-        plot_reconstructions(
-            cfg,
-            model,
-            loader,
-            device,
-            filename=plot_dir / f"reconstructions_step_{step}.pdf",
-            artifact_folder="reconstructions",
-        )
-        plot_counterfactuals(
-            cfg,
-            model,
-            loader,
-            device,
-            filename=plot_dir / f"counterfactuals_step_{step}.pdf",
-            artifact_folder="counterfactuals",
-        )
+        if "encoder" in cfg.data:
+            plot_reconstructions(
+                cfg,
+                model,
+                loader,
+                device,
+                filename=plot_dir / f"reconstructions_step_{step}.{format}",
+                artifact_folder="reconstructions",
+                save_to_mlflow=save_to_mlflow,
+            )
+            plot_counterfactuals(
+                cfg,
+                model,
+                loader,
+                device,
+                filename=plot_dir / f"counterfactuals_step_{step}.{format}",
+                artifact_folder="counterfactuals",
+                save_to_mlflow=save_to_mlflow,
+            )
         plot_solution_function_responses(
             cfg,
             model,
             loader,
             MAP_interventions,
             device,
-            filename=plot_dir / f"solution_function_responses_step_{step}.pdf",
+            filename=plot_dir / f"solution_function_responses_step_{step}.{format}",
             artifact_folder="solution_function_responses",
+            save_to_mlflow=save_to_mlflow,
         )
         implicit_graph_adjacency_matrix = generate_directed_graph_matrix(
             metrics, f"implicit_graph_"
@@ -732,17 +870,9 @@ def plot_loop(cfg, model, loader, metrics, device, step):
             cfg,
             adjacency_matrix=implicit_graph_adjacency_matrix,
             MAP_interventions=MAP_interventions,
-            filename=plot_dir / f"implicit_graph_step_{step}.pdf",
+            filename=plot_dir / f"implicit_graph_step_{step}.{format}",
             artifact_folder="implicit_graph",
-        )
-
-        enco_adjacency_matrix = generate_directed_graph_matrix(metrics, f"enco_graph_")
-        plot_graph(
-            cfg,
-            enco_adjacency_matrix,
-            MAP_interventions,
-            filename=plot_dir / f"enco_graph_step_{step}.pdf",
-            artifact_folder="enco_graph",
+            save_to_mlflow=save_to_mlflow,
         )
 
 
@@ -752,7 +882,11 @@ def evaluate(cfg, model):
     logger.info("Starting evaluation")
 
     # Compute metrics
-    test_metrics = eval_dci_scores(cfg, model, partition=cfg.eval.eval_partition)
+    test_metrics = {}
+    test_metrics.update(eval_dci_scores(cfg, model, partition=cfg.eval.eval_partition))
+    test_metrics.update(
+        eval_dci_scores(cfg, model, partition=cfg.eval.eval_partition, interventional=True)
+    )
     test_metrics.update(eval_enco_graph(cfg, model, partition=cfg.eval.eval_partition))
     test_metrics.update(eval_implicit_graph(cfg, model, partition=cfg.eval.eval_partition))
     test_metrics.update(eval_test_metrics(cfg, model))
@@ -773,7 +907,33 @@ def evaluate(cfg, model):
     df = pd.DataFrame.from_dict(test_metrics_)
     df.to_csv(Path(cfg.general.exp_dir) / "metrics" / "test_metrics.csv")
 
+    eval_plot(cfg, model, test_metrics, partition=cfg.eval.eval_partition)
+
     return test_metrics
+
+
+def eval_plot(cfg, model, metrics, partition="val"):
+    loader = get_dataloader(cfg, partition, cfg.eval.batchsize)
+    device = torch.device(cfg.training.device)
+
+    plot_dir = Path(cfg.general.exp_dir) / "figures"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    intervention_posterior, intervention_label = calculate_intervention_posteriors(
+        cfg, model, loader, device
+    )
+    average_intervention_posterior = calculate_average_intervention_posterior(
+        cfg, intervention_posterior, intervention_label, device=device
+    )
+    _, MAP_interventions = average_intervention_posterior.max(dim=1)
+    enco_adjacency_matrix = generate_directed_graph_matrix(metrics, f"enco_graph_")
+    plot_graph(
+        cfg,
+        enco_adjacency_matrix,
+        MAP_interventions,
+        filename=plot_dir / f"enco_graph_eval.pdf",
+        artifact_folder="enco_graph",
+    )
 
 
 @torch.no_grad()
@@ -794,7 +954,9 @@ def eval_test_metrics(cfg, model):
 
 
 @torch.no_grad()
-def eval_dci_scores(cfg, model, partition="val", test_loader=None, full_importance_matrix=True):
+def eval_dci_scores(
+    cfg, model, partition="val", test_loader=None, full_importance_matrix=True, interventional=False
+):
     """Evaluates DCI scores"""
 
     model.eval()
@@ -811,8 +973,28 @@ def eval_dci_scores(cfg, model, partition="val", test_loader=None, full_importan
         model_z, true_z = [], []
         model_e, true_e = [], []
 
-        for x_batch, _, true_z_batch, *_, true_e_batch, _ in dataloader:
+        for (
+            x1_batch,
+            x2_batch,
+            true_z1_batch,
+            true_z2_batch,
+            *_,
+            true_e1_batch,
+            true_e2_batch,
+        ) in dataloader:
+
+            if not interventional:
+                x_batch = x1_batch
+                true_z_batch = true_z1_batch
+                true_e_batch = true_e1_batch
+            else:
+                x_batch = x2_batch
+                true_z_batch = true_z2_batch
+                true_e_batch = true_e2_batch
+
             x_batch = x_batch.to(device)
+            true_z_batch = true_z_batch.to(device)
+            true_e_batch = true_e_batch.to(device)
 
             z_batch = model.encode_to_causal(x_batch, deterministic=True)
             e_batch = model.encode_to_noise(x_batch, deterministic=True)
@@ -890,7 +1072,15 @@ def eval_implicit_graph(cfg, model, partition="val", dataloader=None):
 
     # Evaluate causal strength
     model = model.to(cpu)
-    causal_effects, topological_order = compute_implicit_causal_effects(model, noise)
+    causal_effects, topological_order = compute_implicit_causal_effects(
+        model,
+        noise,
+        concat_mask=(
+            cfg.model.scm.concat_masks_to_parents
+            if "concat_masks_to_parents" in cfg.model.scm
+            else True
+        ),
+    )
 
     # Package as dict
     results = {
@@ -992,6 +1182,20 @@ def epoch_schedules(cfg, model, epoch, optim):
         logger.info(f"Determining topological order at epoch {epoch}")
         fix_topological_order(cfg, model, partition="val")
 
+    # Introduce child variables
+    if "introduce_child_interventions_after_epoch" not in cfg.training:
+        introduce_child_interventions = True
+    else:
+        introduce_child_interventions = (
+            cfg.training.introduce_child_interventions_after_epoch is None
+            or epoch >= cfg.training.introduce_child_interventions_after_epoch
+        )
+    if (
+        "introduce_child_interventions_after_epoch" in cfg.training
+        and epoch == cfg.training.introduce_child_interventions_after_epoch
+    ):
+        logger.info(f"Introducing child interventions at epoch {epoch}")
+
     # Deterministic intervention encoders?
     if cfg.training.deterministic_intervention_encoder_after_epoch is None:
         deterministic_intervention_encoder = False
@@ -1002,7 +1206,12 @@ def epoch_schedules(cfg, model, epoch, optim):
     if epoch == cfg.training.deterministic_intervention_encoder_after_epoch:
         logger.info(f"Switching to deterministic intervention encoder at epoch {epoch}")
 
-    return model_interventions, pretrain, deterministic_intervention_encoder
+    return (
+        model_interventions,
+        pretrain,
+        deterministic_intervention_encoder,
+        introduce_child_interventions,
+    )
 
 
 @torch.no_grad()
@@ -1033,9 +1242,48 @@ def fix_topological_order(cfg, model, partition="val", dataloader=None):
     dummy_values = torch.median(noise, dim=0).values
     logger.info(f"Dummy noise encodings: {dummy_values}")
 
-    # Find topological order
-    model = model.to(cpu)
-    topological_order = find_topological_order(model, noise)
+    if (
+        "fix_topological_order" in cfg.training
+        and "fix_using_map_interventions" in cfg.training.fix_topological_order
+        and cfg.training.fix_topological_order.fix_using_map_interventions
+    ):
+        logger.info("Determining topological order using MAP interventions")
+        intervention_posterior, intervention_label = calculate_intervention_posteriors(
+            cfg, model, dataloader, device
+        )
+        average_intervention_posterior = calculate_average_intervention_posterior(
+            cfg, intervention_posterior, intervention_label, device=device
+        )
+        _, MAP_interventions = average_intervention_posterior.max(dim=1)
+
+        if len(torch.unique(MAP_interventions)) < cfg.model.dim_z + 1:
+            raise ValueError(
+                f"MAP interventions do not cover all components. MAP interventions: {MAP_interventions}."
+            )
+        else:
+            # remove empty intervention
+            MAP_components = MAP_interventions[MAP_interventions != 0] - 1
+
+        topological_order = MAP_components
+    elif (
+        "fix_topological_order" in cfg.training
+        and "fixed_order" in cfg.training.fix_topological_order
+        and cfg.training.fix_topological_order.fixed_order is not None
+    ):
+        logger.info("Using fixed topological order")
+        topological_order = cfg.training.fix_topological_order.fixed_order
+    else:
+        # Find topological order
+        model = model.to(cpu)
+        topological_order = find_topological_order(
+            model,
+            noise,
+            concat_mask=(
+                cfg.model.scm.concat_masks_to_parents
+                if "concat_masks_to_parents" in cfg.model.scm
+                else True
+            ),
+        )
     logger.info(f"Topological order: {topological_order}")
 
     # Fix topological order
