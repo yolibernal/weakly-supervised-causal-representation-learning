@@ -49,6 +49,8 @@ def get_activation(key):
         return nn.LeakyReLU()
     elif key == "softmax":
         return nn.Softmax(dim=1)
+    elif key == "group_sort":
+        return lmn.GroupSort(n_groups=2)
     else:
         raise ValueError(f"Unknown activation {key}")
 
