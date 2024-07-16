@@ -20,6 +20,8 @@ from ws_crl.encoder.base import Inverse
 from ws_crl.encoder.flow import SONEncoder
 from ws_crl.encoder.image_vae import CoordConv2d, ImageSBDecoder
 from ws_crl.utils import generate_directed_graph_matrix, get_first_batch, remove_prefix
+from spatialvaes.vaes import SpatialBroadcastVAE
+import json
 
 # Global constants
 FONTSIZE = 11  # pt
@@ -73,13 +75,71 @@ def init_plt():
     )
 
 
-def save_plot(fig, filename, artifact_folder=None, save_to_mlflow=True):
+def save_plot(fig, filename, artifact_folder=None, save_to_mlflow=True, close_fig=True):
     fig.savefig(filename)
     if save_to_mlflow:
         mlflow.log_artifact(
             filename, artifact_folder if artifact_folder is not None else Path(filename).stem
         )
-    plt.close(fig)
+    if close_fig:
+        plt.close(fig)
+
+
+def plot_metric_spread(
+    cfg,
+    metric_dict,
+    metric_name,
+    metric_label=None,
+    x_jitter_std=False,
+    boxplot=False,
+    plot_mean=True,
+    plot_fails=False,
+    filename=None,
+    ax=None,
+):
+    if ax is None:
+        fig, ax = plt.subplots()
+    else:
+        fig = ax.get_figure()
+
+    metric_dict = {k: np.array(v[metric_name]) for k, v in metric_dict.items()}
+
+    if plot_fails:
+        # plot NaNs
+        for i, (model, metrics) in enumerate(metric_dict.items()):
+            nan_indices = np.argwhere(np.isnan(metrics))
+            if len(nan_indices) > 0:
+                x = np.ones_like(metrics[nan_indices]) * (i + 1)
+                fail_value = 0.0
+                ax.plot(x, fail_value, "x", color="red", label=f"{model} (NaN)")
+
+    # filter out NaNs
+    metric_dict = {k: v[~np.isnan(v)] for k, v in metric_dict.items()}
+
+    if boxplot:
+        ax.boxplot(metric_dict.values(), labels=metric_dict.keys(), showmeans=plot_mean)
+    else:
+        if plot_mean:
+            for i, (model, metrics) in enumerate(metric_dict.items()):
+                ax.plot(i + 1, np.mean(metrics), "^", color="black")
+
+        # add x labels
+        ax.set_xticks(range(1, len(metric_dict) + 1))
+        ax.set_xticklabels(metric_dict.keys())
+    for i, (model, metrics) in enumerate(metric_dict.items()):
+        if x_jitter_std and x_jitter_std > 0.0:
+            x = np.random.normal(i + 1, x_jitter_std, size=len(metrics))
+        else:
+            x = np.ones_like(metrics) * (i + 1)
+        ax.plot(x, metrics, "o", alpha=0.5, label=model)
+
+    ax.set_xlabel("Model")
+    ax.set_ylabel(metric_label if metric_label is not None else metric_name)
+    ax.legend()
+
+    if filename is not None:
+        save_plot(fig, filename=filename, save_to_mlflow=False)
+    return fig, ax
 
 
 def plot_importance_matrix(
@@ -104,6 +164,7 @@ def plot_importance_matrix(
         save_plot(fig, filename, artifact_folder, save_to_mlflow=save_to_mlflow)
     else:
         fig.show()
+    return fig, ax
 
 
 def plot_latent_space(
@@ -117,14 +178,22 @@ def plot_latent_space(
     filename=None,
     artifact_folder=None,
     save_to_mlflow=True,
+    component_rows_to_plot=None,
 ):
-    fig, axes = plt.subplots(
-        figsize=(cfg.model.dim_z * 4, cfg.model.dim_z * 4),
-        nrows=cfg.model.dim_z,
-        ncols=cfg.model.dim_z,
+    component_rows = (
+        range(cfg.model.dim_z) if component_rows_to_plot is None else component_rows_to_plot
     )
-    for i in range(cfg.model.dim_z):
-        for j in range(cfg.model.dim_z):
+
+    nrows = len(component_rows)
+    ncols = cfg.model.dim_z
+    fig, axes = plt.subplots(
+        figsize=(ncols * 4, nrows * 4),
+        nrows=nrows,
+        ncols=ncols,
+    )
+    for i, ci in enumerate(component_rows):
+        for cj in range(cfg.model.dim_z):
+            ax = axes[i, cj]
             plot_latent_space_components(
                 cfg,
                 model,
@@ -133,8 +202,8 @@ def plot_latent_space(
                 device,
                 causal=causal,
                 num_batches=num_batches,
-                components=[i, j],
-                ax=axes[i, j],
+                components=[ci, cj],
+                ax=ax,
             )
 
     fig.tight_layout()
@@ -142,6 +211,7 @@ def plot_latent_space(
         save_plot(fig, filename, artifact_folder, save_to_mlflow=save_to_mlflow)
     else:
         fig.show()
+    return fig, axes
 
 
 def plot_latent_space_components(
@@ -171,8 +241,10 @@ def plot_latent_space_components(
     ax.set_title(f"Predicted {'noise' if not causal else 'causal'} encodings")
 
     latent_label = "e" if not causal else "z"
-    ax.set_xlabel(f"${latent_label}_{corresponding_components[0] + 1}$")
-    ax.set_ylabel(f"${latent_label}_{corresponding_components[1] + 1}$")
+    # ax.set_xlabel(f"${latent_label}_{corresponding_components[0] + 1}$")
+    # ax.set_ylabel(f"${latent_label}_{corresponding_components[1] + 1}$")
+    ax.set_xlabel(f"${latent_label}_{components[0] + 1}$")
+    ax.set_ylabel(f"${latent_label}_{components[1] + 1}$")
 
     if num_batches is None:
         num_batches = len(loader)
@@ -252,6 +324,7 @@ def plot_average_intervention_posterior(
         save_plot(fig, filename, artifact_folder, save_to_mlflow=save_to_mlflow)
     else:
         fig.show()
+    return fig, ax
 
 
 def plot_noise_pairs(
@@ -411,7 +484,7 @@ def plot_x(cfg, x, ax=None, x1=None, plot_arrows=False):
             if x1 is not None:
                 x1, _ = decoder(x1.view(1, x1.size(0)))
                 x1 = x1[0]
-        if cfg.data.encoder.type == "sbd":
+        elif cfg.data.encoder.type == "sbd":
             exp_dir = Path(cfg.data.encoder.exp_dir)
             decoder_cfg_path = exp_dir / "config.yml"
 
@@ -448,6 +521,40 @@ def plot_x(cfg, x, ax=None, x1=None, plot_arrows=False):
 
             x, _ = decoder(x.unsqueeze(0), deterministic=True)
             x = x[0]
+        elif cfg.data.encoder.type == "spatialvaes.sbd":
+            exp_dir = Path(cfg.data.encoder.exp_dir)
+            state_dict_path = exp_dir / cfg.data.encoder.model_name
+            config_path = exp_dir / "config.json"
+
+            with open(config_path) as f:
+                conf = json.load(f)
+
+            vae = SpatialBroadcastVAE.from_config(conf)
+            vae.load_state_dict(torch.load(state_dict_path))
+
+            decoder = vae.decoder
+            decoder.to(x.device)
+
+            if (
+                cfg.data.x1_mean is not None
+                and cfg.data.x2_mean is not None
+                and cfg.data.x1_std is not None
+                and cfg.data.x2_std is not None
+            ):
+                x1_mean = torch.tensor(cfg.data.x1_mean)
+                x1_std = torch.tensor(cfg.data.x1_std)
+                x2_mean = torch.tensor(cfg.data.x2_mean)
+                x2_std = torch.tensor(cfg.data.x2_std)
+
+                x_mean = (x1_mean + x2_mean) / 2
+                x_std = (x1_std + x2_std) / 2
+
+                x = x * x_std.to(x.device) + x_mean.to(x.device)
+
+            x = x.unsqueeze(0)
+            x = x.view(x.size(0), x.size(1), 1, 1)
+            x = decoder(x)
+            x = x[0].permute(1, 2, 0)
 
     if not cfg or cfg.data.type == "image":
         x = x.clamp(0, 1).mul(255).cpu().to(torch.uint8)
@@ -562,8 +669,8 @@ def plot_reconstructions(
             model.encode_to_causal(x2s, deterministic=True), deterministic=True
         )
     else:
-        x1s_reco = model.encode_decode(x1s)
-        x2s_reco = model.encode_decode(x2s)
+        x1s_reco = model.encode_decode(x1s, deterministic=True)
+        x2s_reco = model.encode_decode(x2s, deterministic=True)
 
     for i in range(n_samples):
         plot_x(cfg, x1s[i], ax=axes[i, 0])
@@ -587,6 +694,7 @@ def plot_reconstructions(
         save_plot(fig, filename, artifact_folder, save_to_mlflow=save_to_mlflow)
     else:
         fig.show()
+    return fig, axes
 
 
 def plot_counterfactuals(
@@ -647,6 +755,7 @@ def plot_counterfactuals(
         save_plot(fig, filename, artifact_folder, save_to_mlflow=save_to_mlflow)
     else:
         fig.show()
+    return fig, axes
 
 
 def intervene(
@@ -701,8 +810,12 @@ def plot_counterfactual_sequences(
     artifact_folder=None,
     intervention_type="decode_noise_to_causal",
     save_to_mlflow=True,
+    components=None,
+    perfect_intervention=True
 ):
-    nrows = n_samples * cfg.model.dim_z
+    if components is None:
+        components = range(cfg.model.dim_z)
+    nrows = n_samples * len(components)
     ncols = 1 + n_interventions  # x, intervention_1, intervention_2, ...
     fig, axes = plt.subplots(
         nrows=nrows, ncols=ncols, figsize=(2 * ncols, 2 * nrows), sharex=True, sharey=True
@@ -729,13 +842,17 @@ def plot_counterfactual_sequences(
     x1s_reco = model.decode_noise(eps1s, deterministic=True)
     # x1s_reco = model.decode_causal(model.scm.noise_to_causal(eps1s), deterministic=True)
 
-    subfigures = fig.subfigures(cfg.model.dim_z)
+    subfigures = fig.subfigures(len(components))
+    if len(components) == 1:
+        subfigures = [subfigures]
 
-    for component in range(cfg.model.dim_z):
-        axes = subfigures[component].subplots(
-            nrows=n_samples, ncols=ncols, sharex=True, sharey=True
-        )
-        subfigures[component].suptitle(f"Component {component + 1}")
+    for j, component in enumerate(components):
+        axes = subfigures[j].subplots(nrows=n_samples, ncols=ncols, sharex=True, sharey=True)
+        if n_samples == 1:
+            axes = np.expand_dims(axes, 0)
+
+        title = f"{'Varying' if intervention_type == 'decode_causal' else 'Intervention on'}  ${'z' if intervention_type == 'decode_causal' else 'e'}_{component + 1}$"
+        subfigures[j].suptitle(title)
 
         values = torch.linspace(
             -intervention_scale * component_std[component],
@@ -754,6 +871,10 @@ def plot_counterfactual_sequences(
             else:
                 z = eps1s
 
+            if not perfect_intervention:
+                # expand value
+                value = value.expand(z.shape[0])
+                value += z[:, component]
             x_intervened, _ = intervene(
                 model,
                 z,
@@ -781,11 +902,13 @@ def plot_counterfactual_sequences(
             # axes[i, j].axis("off")
             pass
 
-    fig.tight_layout()
+    # fig.tight_layout()
     if filename is not None:
         save_plot(fig, filename, artifact_folder, save_to_mlflow=save_to_mlflow)
     else:
         fig.show()
+
+    return fig, axes
 
 
 def plot_solution_function_responses(
@@ -889,6 +1012,7 @@ def plot_solution_function_responses(
         save_plot(fig, filename, artifact_folder, save_to_mlflow=save_to_mlflow)
     else:
         fig.show()
+    return fig, axes
 
 
 def plot_graph(
