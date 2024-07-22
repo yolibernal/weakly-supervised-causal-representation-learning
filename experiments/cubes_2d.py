@@ -81,7 +81,9 @@ def experiment(cfg):
     # Initialization
     experiment_id = initialize_experiment(cfg)
 
-    with mlflow.start_run(experiment_id=experiment_id, run_name=cfg.general.run_name):
+    with mlflow.start_run(experiment_id=experiment_id, run_name=cfg.general.run_name) as run:
+        cfg.general.run_name = run.info.run_name
+
         save_config(cfg)
 
         # Train
