@@ -96,9 +96,13 @@ def plot_metric_spread(
     plot_fails=False,
     filename=None,
     ax=None,
+    marker="o",
+    colors=None,
+    ylim=None,
+    add_legend=True,
 ):
     if ax is None:
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(figsize=(6, 5))
     else:
         fig = ax.get_figure()
 
@@ -121,7 +125,7 @@ def plot_metric_spread(
     else:
         if plot_mean:
             for i, (model, metrics) in enumerate(metric_dict.items()):
-                ax.plot(i + 1, np.mean(metrics), "^", color="black")
+                ax.plot(i + 1, np.mean(metrics), "^" if colors is None else marker, color="black")
 
         # add x labels
         ax.set_xticks(range(1, len(metric_dict) + 1))
@@ -131,14 +135,33 @@ def plot_metric_spread(
             x = np.random.normal(i + 1, x_jitter_std, size=len(metrics))
         else:
             x = np.ones_like(metrics) * (i + 1)
-        ax.plot(x, metrics, "o", alpha=0.5, label=model)
+        ax.plot(
+            x,
+            metrics,
+            marker,
+            alpha=0.5,
+            label=model,
+            color=colors[i] if colors is not None else None,
+        )
+    if ylim is not None:
+        ax.set_ylim(ylim)
 
     ax.set_xlabel("Model")
     ax.set_ylabel(metric_label if metric_label is not None else metric_name)
-    ax.legend()
+    if add_legend:
+        handles = [
+            matplotlib.lines.Line2D(
+                [0], [0], linestyle="", marker=marker, color="black", label="Run", alpha=0.5
+            ),
+            matplotlib.lines.Line2D(
+                [0], [0], linestyle="", marker="^", color="black", label="Mean"
+            ),
+        ]
+        ax.legend(handles=handles)
 
     if filename is not None:
         save_plot(fig, filename=filename, save_to_mlflow=False)
+
     return fig, ax
 
 
@@ -179,21 +202,27 @@ def plot_latent_space(
     artifact_folder=None,
     save_to_mlflow=True,
     component_rows_to_plot=None,
+    component_cols_to_plot=None,
 ):
     component_rows = (
         range(cfg.model.dim_z) if component_rows_to_plot is None else component_rows_to_plot
     )
+    component_cols = (
+        range(cfg.model.dim_z) if component_cols_to_plot is None else component_cols_to_plot
+    )
 
     nrows = len(component_rows)
-    ncols = cfg.model.dim_z
+    ncols = len(component_cols)
     fig, axes = plt.subplots(
-        figsize=(ncols * 4, nrows * 4),
+        figsize=(ncols * 3, nrows * 3),
         nrows=nrows,
         ncols=ncols,
     )
+    if len(component_rows) == 1:
+        axes = np.expand_dims(axes, 0)
     for i, ci in enumerate(component_rows):
-        for cj in range(cfg.model.dim_z):
-            ax = axes[i, cj]
+        for j, cj in enumerate(component_cols):
+            ax = axes[i, j]
             plot_latent_space_components(
                 cfg,
                 model,
@@ -204,6 +233,7 @@ def plot_latent_space(
                 num_batches=num_batches,
                 components=[ci, cj],
                 ax=ax,
+                title=False,
             )
 
     fig.tight_layout()
@@ -227,6 +257,7 @@ def plot_latent_space_components(
     filename=None,
     artifact_folder=None,
     save_to_mlflow=True,
+    title=True,
 ):
     assert len(components) == 2
 
@@ -238,7 +269,8 @@ def plot_latent_space_components(
 
     corresponding_components = [MAP_interventions[dim + 1] - 1 for dim in components]
 
-    ax.set_title(f"Predicted {'noise' if not causal else 'causal'} encodings")
+    if title:
+        ax.set_title(f"Predicted {'noise' if not causal else 'causal'} encodings")
 
     latent_label = "e" if not causal else "z"
     # ax.set_xlabel(f"${latent_label}_{corresponding_components[0] + 1}$")
@@ -303,21 +335,46 @@ def plot_average_intervention_posterior(
     filename=None,
     artifact_folder=None,
     save_to_mlflow=True,
+    cbar=True,
+    ax=None,
+    title=True,
 ):
     num_interventions = cfg.data.dim_z + 1
 
-    fig, ax = plt.subplots()
+    if ax is None:
+        fig, ax = plt.subplots()
+    else:
+        fig = ax.get_figure()
 
-    img = ax.imshow(average_intervention_posterior.cpu().detach().numpy())
+    vmin = 0.0
+    vmax = 1.0
+
+    img = ax.imshow(average_intervention_posterior.cpu().detach().numpy(), vmin=vmin, vmax=vmax)
     ax.set_xticks(range(num_interventions))
     ax.set_yticks(range(num_interventions))
-    ax.set_xticklabels(["empty"] + [f"$\widehat{{z_{i + 1}}}$" for i in range(cfg.data.dim_z)])
-    ax.set_yticklabels(["empty"] + [f"$z_{i + 1}$" for i in range(cfg.data.dim_z)])
-    ax.set_xlabel("Predicted Intervention on")
-    ax.set_ylabel("True Intervention on")
-    ax.set_title("Average Intervention Posterior")
-    cbar = ax.figure.colorbar(img, ax=ax)
-    cbar.ax.set_ylabel("Posterior", rotation=-90, va="bottom")
+    ax.set_xticklabels(
+        ["$\emptyset$"] + [f"$\widehat{{z_{i + 1}}}$" for i in range(cfg.data.dim_z)]
+    )
+    ax.set_yticklabels(["$\emptyset$"] + [f"$z_{i + 1}$" for i in range(cfg.data.dim_z)])
+    ax.set_xlabel("Predicted i")
+    ax.set_ylabel("True i")
+
+    if title:
+        if type(title) == str:
+            ax.set_title(title)
+        else:
+            ax.set_title("Average Intervention Posterior")
+
+    if cbar:
+        cbar = ax.figure.colorbar(img, ax=ax, fraction=0.046, pad=0.04)
+        img.set_clim(vmin, vmax)
+
+        # set cbar height
+        cbar.ax.set_position([0.85, 0.15, 0.05, 0.7])
+
+        # set label
+        # cbar.set_label("$p(i \in I|x, \widetilde{x}$)")
+        cbar.set_label("Probability")
 
     fig.tight_layout()
     if filename is not None:
@@ -577,7 +634,8 @@ def plot_x(cfg, x, ax=None, x1=None, plot_arrows=False):
 
         assert len(x) % 2 == 0
 
-        color_pool = list(mcolors.BASE_COLORS.keys())
+        # color_pool = list(mcolors.BASE_COLORS.keys())
+        color_pool = ["red", "green", "blue", "orange", "purple", "brown", "pink", "gray"]
 
         if len(x) // 2 < len(color_pool):
             colors = color_pool[: len(x) // 2]
@@ -811,7 +869,8 @@ def plot_counterfactual_sequences(
     intervention_type="decode_noise_to_causal",
     save_to_mlflow=True,
     components=None,
-    perfect_intervention=True
+    perfect_intervention=True,
+    title=None,
 ):
     if components is None:
         components = range(cfg.model.dim_z)
@@ -851,7 +910,9 @@ def plot_counterfactual_sequences(
         if n_samples == 1:
             axes = np.expand_dims(axes, 0)
 
-        title = f"{'Varying' if intervention_type == 'decode_causal' else 'Intervention on'}  ${'z' if intervention_type == 'decode_causal' else 'e'}_{component + 1}$"
+        # if title is None:
+        #     title = f"{'Varying' if intervention_type == 'decode_causal' else 'Intervention on'}  ${'z' if intervention_type == 'decode_causal' else 'z'}_{component + 1}$"
+        title = f"{'Varying' if intervention_type == 'decode_causal' else 'Intervention on'}  ${'z' if intervention_type == 'decode_causal' else 'z'}_{component + 1}$"
         subfigures[j].suptitle(title)
 
         values = torch.linspace(
@@ -886,7 +947,7 @@ def plot_counterfactual_sequences(
             x1s_intervened[:, i, :] = x_intervened
 
         for i in range(n_samples):
-            plot_x(cfg, x1s_reco[i], ax=axes[i, 0])
+            plot_x(cfg, x1s[i], ax=axes[i, 0])
 
             for j in range(n_interventions):
                 plot_x(
@@ -897,6 +958,7 @@ def plot_counterfactual_sequences(
                     plot_arrows=True,
                 )
 
+    # axes[0, 0].set_title("$x$")
     for i in range(nrows):
         for j in range(ncols):
             # axes[i, j].axis("off")
@@ -924,14 +986,32 @@ def plot_solution_function_responses(
     filename=None,
     artifact_folder=None,
     save_to_mlflow=True,
+    component_rows_to_plot=None,
+    component_cols_to_plot=None,
+    add_mapping_to_plot=False,
+    add_title=True,
+    sharey="col",
 ):
-    fig, axes = plt.subplots(
-        nrows=cfg.model.dim_z,
-        ncols=cfg.model.dim_z,
-        figsize=(cfg.model.dim_z * 3, cfg.model.dim_z * 3),
-        sharex=True,
-        sharey="col",
+    component_rows = (
+        range(cfg.model.dim_z) if component_rows_to_plot is None else component_rows_to_plot
     )
+    component_cols = (
+        range(cfg.model.dim_z) if component_cols_to_plot is None else component_cols_to_plot
+    )
+
+    nrows = len(component_rows)
+    ncols = len(component_cols)
+
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=(ncols * 3, nrows * 3),
+        sharex=True,
+        sharey=sharey,
+    )
+
+    if len(component_rows) == 1:
+        axes = np.expand_dims(axes, 0)
 
     if sort_by_MAP_interventions:
         if len(torch.unique(MAP_interventions)) < cfg.model.dim_z + 1:
@@ -980,23 +1060,28 @@ def plot_solution_function_responses(
             else:
                 solution_function_responses[i] = model.scm.noise_to_causal(e)
 
-        for i in range(cfg.model.dim_z):
-            for j in range(cfg.model.dim_z):
+        for i, ci in enumerate(component_rows):
+            for j, cj in enumerate(component_cols):
                 ax = axes[i, j]
                 ax.plot(
                     values.detach().cpu(),
-                    solution_function_responses[i, :, j].detach().cpu(),
+                    solution_function_responses[ci, :, cj].detach().cpu(),
                     alpha=0.5,
                 )
-                ax.set_title(f"$s_{j+1}(e)$, varying $e_{i+1}$")
+                # ax.set_title(f"$s_{j+1}(e)$, varying $e_{i+1}$")
+                e_vary_label = f"e_{ci+1}" if cj + 1 != ci + 1 else f"\widetilde{{e}}_{ci+1}"
+                ax.set_title(
+                    f"$s_{cj+1}(\widetilde{{e}}_{cj+1};e_{{\\backslash {cj+1}}})$, varying ${e_vary_label}$"
+                )
 
     # title
-    fig.suptitle(
-        f"Solution functions responses",
-        fontsize=20,
-    )
+    if add_title:
+        fig.suptitle(
+            f"Solution functions responses",
+            fontsize=20,
+        )
 
-    if sort_by_MAP_interventions:
+    if sort_by_MAP_interventions and add_mapping_to_plot:
         plt.figtext(
             0.5,
             0.01,
@@ -1126,3 +1211,4 @@ def plot_columns(cfg, xs, nrows=4, col_names=None, filename=None):
     fig.tight_layout()
     if filename:
         save_plot(fig, filename, save_to_mlflow=False)
+    return fig, axes
