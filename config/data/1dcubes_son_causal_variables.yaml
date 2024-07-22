@@ -1,14 +1,12 @@
-dataset: 2dcubes
-type: xy_pairs
+dataset: 1dcubes
+type: y_pos
 
-dim_x: 6
-dim_z: 6
+dim_x: 3
+dim_z: 3
 
 encoder:
   type: son
   path: '${data.data_dir}/encoder.pt'
-
-child_intervention_labels: [5, 6]
 
 noise: 0
 

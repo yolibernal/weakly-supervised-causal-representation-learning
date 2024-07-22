@@ -1,9 +1,9 @@
 defaults:
   - general: local
   - preprocessing: 2dcubes
-  - data: 2dcubes_grayscale_shapes_imbalanced_blackbg_raw
+  - data: 2dcubes_grayscale_shapes_scale_1.0_equi_child_noise_allow_collisions_25k_blackbg_raw
   - model: 2dcubes_reduce_dim_sbd
-  - training: 2dcubes_reduce_dim_simple
+  - training: 2dcubes_reduce_dim_increase_beta
   - eval: default
   - plotting: default
   - hydra

@@ -2,7 +2,7 @@ defaults:
   - general: local
   - data: 2dcubes_son_causal_variables
   - model: 2dcubes_ilcm
-  - training: 2dcubes_ilcm
+  - training: 2dcubes_only_pretrain
   - eval: default
   - plotting: default
   - hydra
