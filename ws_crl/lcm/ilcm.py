@@ -198,6 +198,9 @@ class ILCM(BaseLCM):
                 else:
                     outputs[key] = val
 
+        solution_function_regularization = self.scm.compute_solution_function_regularization()
+        outputs["solution_function_regularization"] = solution_function_regularization
+
         loss = self._compute_outputs(
             beta,
             beta_intervention_target,
